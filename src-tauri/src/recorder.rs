@@ -28,6 +28,10 @@ struct Recording {
     id: u64,
     name: String,
     created_at: u64,
+    #[serde(default = "default_playback_speed")]
+    playback_speed: f64,
+    #[serde(default)]
+    loop_playback: bool,
     events: Vec<TimedEvent>,
 }
 
@@ -36,6 +40,8 @@ struct Recording {
 pub struct RecordingSummary {
     id: u64,
     name: String,
+    playback_speed: f64,
+    loop_playback: bool,
     created_at: u64,
     event_count: usize,
     duration_ms: u64,
@@ -55,6 +61,20 @@ pub struct RecorderState {
 pub struct RenameRecordingRequest {
     id: u64,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRecordingPlaybackSpeedRequest {
+    id: u64,
+    speed: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRecordingLoopPlaybackRequest {
+    id: u64,
+    value: bool,
 }
 
 struct RecorderSession {
@@ -160,6 +180,8 @@ impl RecorderRuntime {
                 id: session.id,
                 name: session.name,
                 created_at: session.created_at,
+                playback_speed: 1.0,
+                loop_playback: false,
                 events: session.events,
             };
             let id = recording.id;
@@ -227,13 +249,50 @@ impl RecorderRuntime {
         self.make_state()
     }
 
+    pub fn update_recording_playback_speed(
+        &self,
+        request: UpdateRecordingPlaybackSpeedRequest,
+    ) -> Result<RecorderState, String> {
+        if self.playing.load(Ordering::SeqCst) {
+            return Err("Cannot change playback speed while playback is running".to_string());
+        }
+
+        let speed = normalize_playback_speed(request.speed)?;
+        let mut recordings = self.recordings.lock().map_err(|err| err.to_string())?;
+        let Some(recording) = recordings.iter_mut().find(|item| item.id == request.id) else {
+            return Err("Recording not found".to_string());
+        };
+        recording.playback_speed = speed;
+        drop(recordings);
+
+        self.persist();
+        self.make_state()
+    }
+
+    pub fn update_recording_loop_playback(
+        &self,
+        request: UpdateRecordingLoopPlaybackRequest,
+    ) -> Result<RecorderState, String> {
+        if self.playing.load(Ordering::SeqCst) {
+            return Err("Cannot change loop mode while playback is running".to_string());
+        }
+
+        let mut recordings = self.recordings.lock().map_err(|err| err.to_string())?;
+        let Some(recording) = recordings.iter_mut().find(|item| item.id == request.id) else {
+            return Err("Recording not found".to_string());
+        };
+        recording.loop_playback = request.value;
+        drop(recordings);
+
+        self.persist();
+        self.make_state()
+    }
+
     pub fn play_recording(
         &self,
         id: u64,
         app: tauri::AppHandle,
         show_window_on_stop: bool,
-        speed: f64,
-        loop_mode: bool,
     ) -> Result<RecorderState, String> {
         if self.recording.load(Ordering::SeqCst) {
             return Err("Recording is running".to_string());
@@ -251,6 +310,8 @@ impl RecorderRuntime {
             .find(|item| item.id == id)
             .cloned()
             .ok_or_else(|| "Recording not found".to_string())?;
+        let speed = recording.playback_speed.max(0.1);
+        let loop_mode = recording.loop_playback;
 
         *self.selected_id.lock().map_err(|err| err.to_string())? = Some(id);
 
@@ -295,8 +356,6 @@ impl RecorderRuntime {
         &self,
         app: tauri::AppHandle,
         show_window_on_stop: bool,
-        speed: f64,
-        loop_mode: bool,
     ) -> Result<RecorderState, String> {
         if self.playing.load(Ordering::SeqCst) {
             return self.stop_playback();
@@ -306,7 +365,7 @@ impl RecorderRuntime {
             return Err("No recording selected".to_string());
         };
 
-        self.play_recording(id, app, show_window_on_stop, speed, loop_mode)
+        self.play_recording(id, app, show_window_on_stop)
     }
 
     pub fn handle_event(
@@ -317,8 +376,6 @@ impl RecorderRuntime {
         active: bool,
         show_window_on_playback_stop: bool,
         auto_hide_on_hotkey: bool,
-        playback_speed: f64,
-        loop_mode: bool,
     ) {
         let record_hotkey = self.record_hotkey_config();
 
@@ -370,12 +427,9 @@ impl RecorderRuntime {
                     if auto_hide_on_hotkey {
                         hide_main_window(app);
                     }
-                    if let Ok(state) = self.toggle_selected_playback(
-                        app.clone(),
-                        show_window_on_playback_stop,
-                        playback_speed,
-                        loop_mode,
-                    ) {
+                    if let Ok(state) =
+                        self.toggle_selected_playback(app.clone(), show_window_on_playback_stop)
+                    {
                         tray::notify_global_hotkey_state(app, !was_playing);
                         if was_playing && show_window_on_playback_stop {
                             show_main_window(app);
@@ -462,6 +516,8 @@ impl RecorderRuntime {
             .map(|recording| RecordingSummary {
                 id: recording.id,
                 name: recording.name.clone(),
+                playback_speed: recording.playback_speed,
+                loop_playback: recording.loop_playback,
                 created_at: recording.created_at,
                 event_count: recording.events.len(),
                 duration_ms: recording.events.iter().map(|event| event.delay_ms).sum(),
@@ -499,6 +555,23 @@ fn unix_ms() -> u64 {
 
 fn default_recording_name(created_at: u64) -> String {
     format!("录制方案 {}", created_at)
+}
+
+fn default_playback_speed() -> f64 {
+    1.0
+}
+
+fn normalize_playback_speed(speed: f64) -> Result<f64, String> {
+    const ALLOWED_SPEEDS: [f64; 5] = [1.0, 1.5, 2.0, 2.5, 3.0];
+
+    if ALLOWED_SPEEDS
+        .iter()
+        .any(|allowed| (speed - allowed).abs() < f64::EPSILON)
+    {
+        Ok(speed)
+    } else {
+        Err("Unsupported playback speed".to_string())
+    }
 }
 
 fn data_dir() -> Option<PathBuf> {

@@ -15,10 +15,6 @@ pub struct AppConfig {
     pub show_window_on_stop: bool,
     #[serde(default = "default_true")]
     pub auto_hide_on_hotkey: bool,
-    #[serde(default = "default_speed")]
-    pub playback_speed: f64,
-    #[serde(default)]
-    pub loop_playback: bool,
 }
 
 fn default_record_hotkey() -> HotkeyConfig {
@@ -33,10 +29,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_speed() -> f64 {
-    1.0
-}
-
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -44,8 +36,6 @@ impl Default for AppConfig {
             record_hotkey: default_record_hotkey(),
             show_window_on_stop: true,
             auto_hide_on_hotkey: true,
-            playback_speed: 1.0,
-            loop_playback: false,
         }
     }
 }

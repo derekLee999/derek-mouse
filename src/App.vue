@@ -10,7 +10,6 @@ import type { HotkeyConfig } from "./types";
 
 const activeTab = ref("clicker");
 const recorderBusy = ref(false);
-const playbackSpeed = ref(1);
 const globalHotkey = ref<HotkeyConfig>({
   ctrl: false,
   alt: false,
@@ -29,7 +28,7 @@ watch(
 <template>
   <main class="app-shell">
     <TitleBar />
-    <GlobalHotkeyBar v-model="globalHotkey" :disabled="activeTab === 'recorder' && recorderBusy" :show-speed-select="activeTab === 'recorder'" @speed-change="playbackSpeed = $event" />
+    <GlobalHotkeyBar v-model="globalHotkey" :disabled="activeTab === 'recorder' && recorderBusy" />
 
     <el-tabs v-model="activeTab" class="workspace-tabs">
       <el-tab-pane name="clicker">
@@ -51,7 +50,7 @@ watch(
           </span>
         </template>
 
-        <RecorderPanel :hotkey="globalHotkey" :playback-speed="playbackSpeed" @busy-change="recorderBusy = $event" />
+        <RecorderPanel :hotkey="globalHotkey" @busy-change="recorderBusy = $event" />
       </el-tab-pane>
     </el-tabs>
   </main>

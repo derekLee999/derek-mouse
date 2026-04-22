@@ -28,6 +28,8 @@ export type ClickerState = {
 export type RecordingSummary = {
   id: number;
   name: string;
+  playbackSpeed: number;
+  loopPlayback: boolean;
   createdAt: number;
   eventCount: number;
   durationMs: number;

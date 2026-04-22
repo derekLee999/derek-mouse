@@ -2,8 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { Delete, EditPen } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { RefreshRight, VideoPlay } from "@element-plus/icons-vue";
 import {
   keyboardKeys,
   keyNeedsModifier,
@@ -14,7 +14,6 @@ import {
 
 const props = defineProps<{
   hotkey: HotkeyConfig;
-  playbackSpeed: number;
 }>();
 
 const emit = defineEmits<{
@@ -40,17 +39,36 @@ const initialized = ref(false);
 const syncingHotkey = ref(false);
 const savingHotkey = ref(false);
 const autoCtrl = ref(false);
-const loopPlayback = ref(false);
+const speedMenu = ref<{
+  recordingId: number | null;
+  x: number;
+  y: number;
+}>({
+  recordingId: null,
+  x: 0,
+  y: 0,
+});
+const recordingMenu = ref<{
+  visible: boolean;
+  x: number;
+  y: number;
+  recording: RecordingSummary | null;
+}>({
+  visible: false,
+  x: 0,
+  y: 0,
+  recording: null,
+});
 
 const busy = computed(() => state.value.recording || state.value.playing);
 const selectedKeyNeedsModifier = computed(() => keyNeedsModifier(recordHotkey.key));
-const speedLabel = computed(() => `${props.playbackSpeed}倍速`);
+const speedOptions = [1, 1.5, 2, 2.5, 3];
 
 let unlistenState: UnlistenFn | undefined;
 let unlistenStatus: UnlistenFn | undefined;
 
 onMounted(async () => {
-  await Promise.all([refreshState(), loadRecordHotkey(), loadLoopPlayback()]);
+  await Promise.all([refreshState(), loadRecordHotkey()]);
   initialized.value = true;
   unlistenState = await listen<RecorderState>("recorder-state", (event) => {
     state.value = event.payload;
@@ -58,11 +76,15 @@ onMounted(async () => {
   unlistenStatus = await listen<boolean>("recorder-status", async () => {
     await refreshState();
   });
+  document.addEventListener("click", closeFloatingMenus);
+  document.addEventListener("keydown", handleDocumentKeydown);
 });
 
 onBeforeUnmount(() => {
   unlistenState?.();
   unlistenStatus?.();
+  document.removeEventListener("click", closeFloatingMenus);
+  document.removeEventListener("keydown", handleDocumentKeydown);
 });
 
 watch(
@@ -101,14 +123,6 @@ async function loadRecordHotkey() {
   const loaded = await invoke<HotkeyConfig>("get_recorder_hotkey_config");
   previousRecordHotkey.value = cloneHotkey(loaded);
   await syncRecordHotkey(loaded);
-}
-
-async function loadLoopPlayback() {
-  loopPlayback.value = await invoke<boolean>("get_loop_playback");
-}
-
-async function setLoopPlayback(value: boolean) {
-  loopPlayback.value = await invoke<boolean>("set_loop_playback", { value });
 }
 
 async function saveRecordHotkey() {
@@ -190,6 +204,128 @@ async function removeRecording(recording: RecordingSummary) {
   state.value = await invoke<RecorderState>("delete_recording", { id: recording.id });
   if (state.value.selectedId === null && state.value.recordings.length > 0) {
     await selectRecording(state.value.recordings[0].id);
+  }
+}
+
+function openRecordingMenu(event: MouseEvent, recording: RecordingSummary) {
+  event.preventDefault();
+  if (busy.value) return;
+  closeSpeedMenu();
+
+  const menuWidth = 132;
+  const menuHeight = 82;
+  recordingMenu.value = {
+    visible: true,
+    x: Math.min(event.clientX, window.innerWidth - menuWidth - 8),
+    y: Math.min(event.clientY, window.innerHeight - menuHeight - 8),
+    recording,
+  };
+}
+
+function closeRecordingMenu() {
+  recordingMenu.value.visible = false;
+}
+
+function closeSpeedMenu() {
+  speedMenu.value.recordingId = null;
+}
+
+function closeFloatingMenus() {
+  closeRecordingMenu();
+  closeSpeedMenu();
+}
+
+function handleDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    closeFloatingMenus();
+  }
+}
+
+async function handleMenuRename() {
+  const recording = recordingMenu.value.recording;
+  closeRecordingMenu();
+  if (recording) {
+    await beginRename(recording);
+  }
+}
+
+async function handleMenuDelete() {
+  const recording = recordingMenu.value.recording;
+  closeRecordingMenu();
+  if (recording) {
+    await removeRecording(recording);
+  }
+}
+
+function formatSpeed(speed: number) {
+  return Number.isInteger(speed) ? speed.toFixed(0) : speed.toString();
+}
+
+function speedLabel(recording: RecordingSummary) {
+  return `${formatSpeed(recording.playbackSpeed)}x`;
+}
+
+function availableSpeeds(recording: RecordingSummary) {
+  return speedOptions.filter((speed) => speed !== recording.playbackSpeed);
+}
+
+function toggleSpeedMenu(event: MouseEvent, recording: RecordingSummary) {
+  event.stopPropagation();
+  if (busy.value) return;
+  closeRecordingMenu();
+
+  if (speedMenu.value.recordingId === recording.id) {
+    closeSpeedMenu();
+    return;
+  }
+
+  const target = event.currentTarget as HTMLElement | null;
+  const rect = target?.getBoundingClientRect();
+  if (!rect) return;
+
+  const menuWidth = 190;
+  const menuHeight = 36;
+  const gap = 6;
+  const minMargin = 8;
+  const left = rect.left + rect.width / 2 - menuWidth / 2;
+  const topAbove = rect.top - menuHeight - gap;
+  const topBelow = rect.bottom + gap;
+
+  speedMenu.value = {
+    recordingId: recording.id,
+    x: Math.min(Math.max(left, minMargin), window.innerWidth - menuWidth - minMargin),
+    y: topAbove >= minMargin ? topAbove : topBelow,
+  };
+}
+
+async function updateRecordingSpeed(recording: RecordingSummary, speed: number) {
+  if (busy.value) return;
+
+  closeSpeedMenu();
+  try {
+    state.value = await invoke<RecorderState>("update_recording_playback_speed", {
+      request: {
+        id: recording.id,
+        speed,
+      },
+    });
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+async function toggleRecordingLoop(recording: RecordingSummary) {
+  if (busy.value) return;
+
+  try {
+    state.value = await invoke<RecorderState>("update_recording_loop_playback", {
+      request: {
+        id: recording.id,
+        value: !recording.loopPlayback,
+      },
+    });
+  } catch (error) {
+    ElMessage.error(String(error));
   }
 }
 
@@ -296,15 +432,6 @@ function formatTime(timestamp: number) {
           />
         </el-select>
       </div>
-      <el-select
-        class="loop-select"
-        :model-value="loopPlayback ? 'loop' : 'once'"
-        :disabled="busy"
-        @change="(v: string) => setLoopPlayback(v === 'loop')"
-      >
-        <el-option label="单次" value="once" />
-        <el-option label="循环" value="loop" />
-      </el-select>
     </div>
 
     <div class="recording-list">
@@ -316,6 +443,7 @@ function formatTime(timestamp: number) {
         class="recording-item"
         :class="{ active: recording.id === state.selectedId, disabled: busy }"
         @click="selectRecording(recording.id)"
+        @contextmenu="openRecordingMenu($event, recording)"
       >
         <el-checkbox
           :model-value="recording.id === state.selectedId"
@@ -337,13 +465,36 @@ function formatTime(timestamp: number) {
           />
           <div v-else class="recording-name-row">
             <strong>{{ recording.name }}</strong>
-            <el-tag
+            <div
               v-if="recording.id === state.selectedId"
-              :type="playbackSpeed !== 1 ? 'danger' : 'success'"
-              size="small"
+              class="recording-tags"
+              @click.stop
             >
-              {{ speedLabel }}
-            </el-tag>
+              <div class="speed-tag-wrap">
+                <el-tag
+                  class="option-tag speed-tag"
+                  :class="{ disabled: busy }"
+                  :type="recording.playbackSpeed !== 1 ? 'danger' : 'success'"
+                  size="small"
+                  @click="toggleSpeedMenu($event, recording)"
+                >
+                  {{ speedLabel(recording) }}
+                </el-tag>
+              </div>
+              <el-tag
+                class="option-tag mode-tag"
+                :class="{ disabled: busy }"
+                :type="recording.loopPlayback ? 'warning' : 'info'"
+                size="small"
+                @click.stop="toggleRecordingLoop(recording)"
+              >
+                <el-icon>
+                  <RefreshRight v-if="recording.loopPlayback" />
+                  <VideoPlay v-else />
+                </el-icon>
+                {{ recording.loopPlayback ? "循环" : "单次" }}
+              </el-tag>
+            </div>
           </div>
           <span>
             {{ formatTime(recording.createdAt) }} ·
@@ -351,24 +502,46 @@ function formatTime(timestamp: number) {
             {{ formatDuration(recording.durationMs) }}
           </span>
         </div>
-        <div class="recording-actions" @click.stop>
-          <el-button
-            text
-            size="small"
-            :disabled="busy"
-            :icon="EditPen"
-            @click="beginRename(recording)"
-          />
-          <el-button
-            text
-            size="small"
-            type="danger"
-            :disabled="busy"
-            :icon="Delete"
-            @click="removeRecording(recording)"
-          />
-        </div>
       </div>
+    </div>
+
+    <div
+      v-if="recordingMenu.visible"
+      class="recording-context-menu"
+      :style="{ left: `${recordingMenu.x}px`, top: `${recordingMenu.y}px` }"
+      @click.stop
+      @mousedown.stop
+      @contextmenu.prevent
+    >
+      <button type="button" class="context-menu-item" @click="handleMenuRename">
+        编辑名称
+      </button>
+      <button type="button" class="context-menu-item danger" @click="handleMenuDelete">
+        删除
+      </button>
+    </div>
+
+    <div
+      v-if="speedMenu.recordingId !== null && !busy"
+      class="speed-menu"
+      :style="{ left: `${speedMenu.x}px`, top: `${speedMenu.y}px` }"
+      @click.stop
+      @mousedown.stop
+    >
+      <template
+        v-for="recording in state.recordings.filter((item) => item.id === speedMenu.recordingId)"
+        :key="recording.id"
+      >
+        <button
+          v-for="speed in availableSpeeds(recording)"
+          :key="speed"
+          type="button"
+          class="speed-option"
+          @click="updateRecordingSpeed(recording, speed)"
+        >
+          {{ formatSpeed(speed) }}x
+        </button>
+      </template>
     </div>
   </section>
 </template>
@@ -395,17 +568,13 @@ function formatTime(timestamp: number) {
 }
 
 .record-hotkey-row {
-  grid-template-columns: 86px auto auto;
+  grid-template-columns: 86px auto;
 }
 
 .record-hotkey-row strong {
   color: var(--el-text-color-primary);
   font-size: 13px;
   font-weight: 600;
-}
-
-.record-hotkey-row :deep(.loop-select) {
-  width: 80px;
 }
 
 .hotkey-controls {
@@ -460,7 +629,7 @@ function formatTime(timestamp: number) {
 
 .recording-item {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   width: 100%;
@@ -508,14 +677,112 @@ function formatTime(timestamp: number) {
 }
 
 .recording-name-row strong {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.recording-actions {
-  display: flex;
+.recording-tags {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
   align-items: center;
-  gap: 2px;
+}
+
+.speed-tag-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.option-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  line-height: 20px;
+  user-select: none;
+  cursor: pointer;
+}
+
+.option-tag.disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.speed-menu {
+  position: fixed;
+  z-index: 3000;
+  display: inline-flex;
+  gap: 4px;
+  width: 190px;
+  padding: 5px;
+  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  box-shadow: var(--el-box-shadow-light);
+}
+
+.speed-option {
+  min-width: 38px;
+  height: 24px;
+  padding: 0 8px;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 24px;
+  text-align: center;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.speed-option:hover {
+  color: #ffffff;
+  background: var(--el-color-primary);
+}
+
+.mode-tag :deep(.el-icon) {
+  margin-right: 2px;
+}
+
+.recording-context-menu {
+  position: fixed;
+  z-index: 4000;
+  display: grid;
+  width: 132px;
+  padding: 6px;
+  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  box-shadow: var(--el-box-shadow-light);
+}
+
+.context-menu-item {
+  height: 30px;
+  padding: 0 10px;
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.context-menu-item:hover {
+  color: var(--el-color-primary);
+  background: var(--el-fill-color-light);
+}
+
+.context-menu-item.danger {
+  color: var(--el-color-danger);
+}
+
+.context-menu-item.danger:hover {
+  color: #ffffff;
+  background: var(--el-color-danger);
 }
 </style>

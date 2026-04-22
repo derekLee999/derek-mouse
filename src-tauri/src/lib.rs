@@ -15,7 +15,10 @@ use std::{
 use clicker::{ClickerConfig, ClickerRuntime};
 use config::{load_config, save_config, AppConfig};
 use input::{listen, ActiveFeature, Event, HotkeyConfig};
-use recorder::{RecorderRuntime, RenameRecordingRequest};
+use recorder::{
+    RecorderRuntime, RenameRecordingRequest, UpdateRecordingLoopPlaybackRequest,
+    UpdateRecordingPlaybackSpeedRequest,
+};
 use tauri::{Emitter, Manager};
 
 struct AppState {
@@ -24,8 +27,6 @@ struct AppState {
     recorder: Arc<RecorderRuntime>,
     show_window_on_global_hotkey_stop: AtomicBool,
     auto_hide_on_hotkey: AtomicBool,
-    playback_speed: Mutex<f64>,
-    loop_playback: AtomicBool,
 }
 
 impl AppState {
@@ -36,15 +37,12 @@ impl AppState {
             .show_window_on_global_hotkey_stop
             .load(Ordering::SeqCst);
         let auto_hide_on_hotkey = self.auto_hide_on_hotkey.load(Ordering::SeqCst);
-        let playback_speed = self.playback_speed.lock().map(|s| *s).unwrap_or(1.0);
 
         let config = AppConfig {
             clicker: clicker_config,
             record_hotkey,
             show_window_on_stop,
             auto_hide_on_hotkey,
-            playback_speed,
-            loop_playback: self.loop_playback.load(Ordering::SeqCst),
         };
         save_config(&config);
     }
@@ -202,24 +200,7 @@ fn play_recording(
     state: tauri::State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
 ) -> Result<recorder::RecorderState, String> {
-    let speed = *state.playback_speed.lock().map_err(|e| e.to_string())?;
-    let loop_mode = state.loop_playback.load(Ordering::SeqCst);
-    state
-        .recorder
-        .play_recording(id, app, false, speed, loop_mode)
-}
-
-#[tauri::command]
-fn get_playback_speed(state: tauri::State<'_, Arc<AppState>>) -> Result<f64, String> {
-    Ok(*state.playback_speed.lock().map_err(|e| e.to_string())?)
-}
-
-#[tauri::command]
-fn set_playback_speed(speed: f64, state: tauri::State<'_, Arc<AppState>>) -> Result<f64, String> {
-    let speed = speed.clamp(0.5, 10.0);
-    *state.playback_speed.lock().map_err(|e| e.to_string())? = speed;
-    state.persist_config();
-    Ok(speed)
+    state.recorder.play_recording(id, app, false)
 }
 
 #[tauri::command]
@@ -230,15 +211,19 @@ fn stop_playback(
 }
 
 #[tauri::command]
-fn get_loop_playback(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
-    Ok(state.loop_playback.load(Ordering::SeqCst))
+fn update_recording_playback_speed(
+    request: UpdateRecordingPlaybackSpeedRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<recorder::RecorderState, String> {
+    state.recorder.update_recording_playback_speed(request)
 }
 
 #[tauri::command]
-fn set_loop_playback(value: bool, state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
-    state.loop_playback.store(value, Ordering::SeqCst);
-    state.persist_config();
-    Ok(value)
+fn update_recording_loop_playback(
+    request: UpdateRecordingLoopPlaybackRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<recorder::RecorderState, String> {
+    state.recorder.update_recording_loop_playback(request)
 }
 
 #[tauri::command]
@@ -276,8 +261,6 @@ fn handle_global_event(state: &Arc<AppState>, app: &tauri::AppHandle, event: Eve
         .load(Ordering::SeqCst);
     let auto_hide_on_hotkey = state.auto_hide_on_hotkey.load(Ordering::SeqCst);
 
-    let playback_speed = state.playback_speed.lock().map(|s| *s).unwrap_or(1.0);
-
     state.clicker.handle_event(
         &event,
         app,
@@ -292,8 +275,6 @@ fn handle_global_event(state: &Arc<AppState>, app: &tauri::AppHandle, event: Eve
         active_feature == ActiveFeature::Recorder,
         show_window_on_global_hotkey_stop,
         auto_hide_on_hotkey,
-        playback_speed,
-        state.loop_playback.load(Ordering::SeqCst),
     );
 }
 
@@ -309,8 +290,6 @@ pub fn run() {
         recorder: recorder.clone(),
         show_window_on_global_hotkey_stop: AtomicBool::new(config.show_window_on_stop),
         auto_hide_on_hotkey: AtomicBool::new(config.auto_hide_on_hotkey),
-        playback_speed: Mutex::new(config.playback_speed),
-        loop_playback: AtomicBool::new(config.loop_playback),
     });
 
     tauri::Builder::default()
@@ -352,10 +331,8 @@ pub fn run() {
             play_recording,
             stop_playback,
             delete_recording,
-            get_playback_speed,
-            set_playback_speed,
-            get_loop_playback,
-            set_loop_playback
+            update_recording_playback_speed,
+            update_recording_loop_playback
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

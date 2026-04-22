@@ -12,12 +12,10 @@ import {
 const props = defineProps<{
   modelValue: HotkeyConfig;
   disabled?: boolean;
-  showSpeedSelect?: boolean;
 }>();
 
 const emit = defineEmits<{
   "update:modelValue": [value: HotkeyConfig];
-  "speed-change": [value: number];
 }>();
 
 const hotkey = reactive<HotkeyConfig>({
@@ -29,21 +27,15 @@ const initialized = ref(false);
 const syncing = ref(false);
 const saving = ref(false);
 const autoCtrl = ref(false);
-const playbackSpeed = ref(1);
 
 const selectedKeyNeedsModifier = computed(() => keyNeedsModifier(hotkey.key));
 const displayHotkey = computed(() => hotkeyText(hotkey));
 
 onMounted(async () => {
   try {
-    const [loaded, speed] = await Promise.all([
-      invoke<HotkeyConfig>("get_hotkey_config"),
-      invoke<number>("get_playback_speed"),
-    ]);
+    const loaded = await invoke<HotkeyConfig>("get_hotkey_config");
     syncFrom(loaded);
-    playbackSpeed.value = speed;
     emit("update:modelValue", cloneHotkey());
-    emit("speed-change", speed);
   } catch (error) {
     ElMessage.error(String(error));
   } finally {
@@ -59,11 +51,6 @@ watch(
   },
   { deep: true },
 );
-
-watch(playbackSpeed, () => {
-  if (!initialized.value) return;
-  void saveSpeed();
-});
 
 watch(
   hotkey,
@@ -97,18 +84,6 @@ async function saveHotkey() {
     ElMessage.error(String(error));
   } finally {
     saving.value = false;
-  }
-}
-
-async function saveSpeed() {
-  try {
-    const speed = await invoke<number>("set_playback_speed", {
-      speed: playbackSpeed.value,
-    });
-    playbackSpeed.value = speed;
-    emit("speed-change", speed);
-  } catch (error) {
-    ElMessage.error(String(error));
   }
 }
 
@@ -201,20 +176,6 @@ function sameHotkey(left: HotkeyConfig, right: HotkeyConfig) {
 
     <span class="hotkey-value">{{ displayHotkey }}</span>
 
-    <el-select
-      v-if="props.showSpeedSelect"
-      v-model="playbackSpeed"
-      class="speed-select"
-      :disabled="props.disabled"
-    >
-      <el-option :value="1" label="1x" />
-      <el-option :value="1.5" label="1.5x" />
-      <el-option :value="2" label="2x" />
-      <el-option :value="2.5" label="2.5x" />
-      <el-option :value="3" label="3x" />
-      <el-option :value="3.5" label="3.5x" />
-      <el-option :value="4" label="4x" />
-    </el-select>
   </section>
 </template>
 
@@ -258,11 +219,6 @@ function sameHotkey(left: HotkeyConfig, right: HotkeyConfig) {
 }
 
 .hotkey-controls :deep(.el-select) {
-  width: 80px;
-}
-
-.speed-select {
-  margin-left: auto;
   width: 80px;
 }
 
