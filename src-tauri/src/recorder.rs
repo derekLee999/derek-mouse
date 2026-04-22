@@ -316,6 +316,7 @@ impl RecorderRuntime {
         playback_hotkey: &HotkeyConfig,
         active: bool,
         show_window_on_playback_stop: bool,
+        auto_hide_on_hotkey: bool,
         playback_speed: f64,
         loop_mode: bool,
     ) {
@@ -341,7 +342,9 @@ impl RecorderRuntime {
                         keyboard.clear_hotkey_down();
                     }
                     let was_recording = self.recording.load(Ordering::SeqCst);
-                    hide_main_window(app);
+                    if auto_hide_on_hotkey {
+                        hide_main_window(app);
+                    }
                     let state = if self.recording.load(Ordering::SeqCst) {
                         self.stop_recording()
                     } else {
@@ -364,7 +367,9 @@ impl RecorderRuntime {
                         keyboard.clear_hotkey_down();
                     }
                     let was_playing = self.playing.load(Ordering::SeqCst);
-                    hide_main_window(app);
+                    if auto_hide_on_hotkey {
+                        hide_main_window(app);
+                    }
                     if let Ok(state) = self.toggle_selected_playback(
                         app.clone(),
                         show_window_on_playback_stop,

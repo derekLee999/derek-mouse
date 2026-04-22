@@ -2,7 +2,13 @@
 import { onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Close, Minus, Top, Setting } from "@element-plus/icons-vue";
+import {
+  Close,
+  Minus,
+  QuestionFilled,
+  Setting,
+  Top,
+} from "@element-plus/icons-vue";
 import type { GlobalHotkeyOptions } from "../types";
 
 type ThemeMode = "light" | "dark" | "system";
@@ -10,6 +16,7 @@ type CloseAction = "exit" | "hide";
 
 const alwaysOnTop = ref(false);
 const showWindowOnStop = ref(true);
+const autoHideOnHotkey = ref(true);
 const appWindow = getCurrentWindow();
 
 const themeMode = ref<ThemeMode>("system");
@@ -61,6 +68,7 @@ onMounted(async () => {
   try {
     const options = await invoke<GlobalHotkeyOptions>("get_global_hotkey_options");
     showWindowOnStop.value = options.showWindowOnStop;
+    autoHideOnHotkey.value = options.autoHideOnHotkey;
   } catch {}
 
   loadSettings();
@@ -78,11 +86,23 @@ watch(closeAction, () => {
 });
 
 async function toggleShowWindowOnStop() {
+  await updateGlobalHotkeyOptions();
+}
+
+async function toggleAutoHideOnHotkey() {
+  await updateGlobalHotkeyOptions();
+}
+
+async function updateGlobalHotkeyOptions() {
   try {
     const options = await invoke<GlobalHotkeyOptions>("update_global_hotkey_options", {
-      options: { showWindowOnStop: showWindowOnStop.value },
+      options: {
+        showWindowOnStop: showWindowOnStop.value,
+        autoHideOnHotkey: autoHideOnHotkey.value,
+      },
     });
     showWindowOnStop.value = options.showWindowOnStop;
+    autoHideOnHotkey.value = options.autoHideOnHotkey;
   } catch {}
 }
 
@@ -105,7 +125,6 @@ async function closeWindow() {
 }
 
 async function startWindowDrag() {
-  settingsVisible.value = false;
   await appWindow.startDragging();
 }
 </script>
@@ -115,52 +134,16 @@ async function startWindowDrag() {
     <div class="titlebar-title">
       <img src="/app-icon.png" alt="" class="titlebar-icon" />
       <span>鼠标连点器</span>
-      <el-popover
-        v-model:visible="settingsVisible"
-        placement="bottom-start"
-        :width="220"
-        trigger="click"
-        :show-arrow="false"
-        :offset="8"
+      <button
+        class="settings-btn"
+        type="button"
+        title="设置"
+        aria-label="设置"
+        @mousedown.stop
+        @click="settingsVisible = true"
       >
-        <template #reference>
-          <button
-            class="settings-btn"
-            type="button"
-            title="设置"
-            aria-label="设置"
-            @mousedown.stop
-          >
-            <el-icon :size="14"><Setting /></el-icon>
-          </button>
-        </template>
-
-        <div class="settings-panel" @mousedown.stop>
-          <div class="settings-item">
-            <span class="settings-label">外观</span>
-            <el-segmented
-              v-model="themeMode"
-              :options="[
-                { label: '浅色', value: 'light' },
-                { label: '深色', value: 'dark' },
-                { label: '跟随系统', value: 'system' },
-              ]"
-              size="small"
-            />
-          </div>
-          <div class="settings-item">
-            <span class="settings-label">关闭按钮</span>
-            <el-segmented
-              v-model="closeAction"
-              :options="[
-                { label: '隐藏窗口', value: 'hide' },
-                { label: '退出程序', value: 'exit' },
-              ]"
-              size="small"
-            />
-          </div>
-        </div>
-      </el-popover>
+        <el-icon :size="14"><Setting /></el-icon>
+      </button>
     </div>
     <div class="window-actions" @mousedown.stop>
       <el-checkbox
@@ -199,6 +182,59 @@ async function startWindowDrag() {
         <el-icon><Close /></el-icon>
       </button>
     </div>
+
+    <el-dialog
+      v-model="settingsVisible"
+      title="设置"
+      width="340px"
+      align-center
+      append-to-body
+      :show-close="true"
+      @mousedown.stop
+    >
+      <div class="settings-panel">
+        <div class="settings-item">
+          <span class="settings-label">外观</span>
+          <el-segmented
+            v-model="themeMode"
+            :options="[
+              { label: '浅色', value: 'light' },
+              { label: '深色', value: 'dark' },
+              { label: '跟随系统', value: 'system' },
+            ]"
+            size="small"
+          />
+        </div>
+        <div class="settings-item">
+          <span class="settings-label">关闭按钮</span>
+          <el-segmented
+            v-model="closeAction"
+            :options="[
+              { label: '隐藏窗口', value: 'hide' },
+              { label: '退出程序', value: 'exit' },
+            ]"
+            size="small"
+          />
+        </div>
+        <div class="settings-item">
+          <span class="settings-label with-help">
+            自动隐藏
+            <el-tooltip content="开启时按下热键后程序自动隐藏" placement="top">
+              <el-icon class="help-icon" :size="14"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </span>
+          <el-segmented
+            v-model="autoHideOnHotkey"
+            :options="[
+              { label: '开启', value: true },
+              { label: '关闭', value: false },
+            ]"
+            size="small"
+            @change="toggleAutoHideOnHotkey"
+          />
+        </div>
+      </div>
+    </el-dialog>
   </header>
 </template>
 
@@ -278,6 +314,21 @@ async function startWindowDrag() {
   color: var(--el-text-color-secondary);
 }
 
+.settings-label.with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.help-icon {
+  color: var(--el-text-color-placeholder);
+  cursor: help;
+}
+
+.help-icon:hover {
+  color: var(--el-color-primary);
+}
+
 .window-actions {
   display: flex;
   align-items: center;
@@ -307,6 +358,17 @@ async function startWindowDrag() {
 .window-action.active {
   color: var(--el-text-color-primary);
   background: var(--el-fill-color-light);
+}
+
+.window-action.active {
+  color: #ffffff;
+  background: var(--el-color-primary);
+  box-shadow: inset 0 -2px 0 var(--el-color-primary-dark-2);
+}
+
+.window-action.active:hover {
+  color: #ffffff;
+  background: var(--el-color-primary-dark-2);
 }
 
 .window-action.close:hover {

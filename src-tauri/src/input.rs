@@ -5,11 +5,12 @@ use windows::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
     UI::{
         Input::KeyboardAndMouse::{
-            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-            KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
-            MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-            MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
-            MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+            MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX,
+            MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+            MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+            MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
+            MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
         },
         WindowsAndMessaging::{
             CallNextHookEx, GetMessageW, GetSystemMetrics, SetWindowsHookExW, UnhookWindowsHookEx,
@@ -25,6 +26,12 @@ use windows::Win32::{
 const WHEEL_DELTA: i16 = 120;
 
 static GLOBAL_CALLBACK: Mutex<Option<Box<dyn FnMut(Event) + Send>>> = Mutex::new(None);
+
+#[derive(Debug, Copy, Clone)]
+struct KeyScan {
+    code: u16,
+    extended: bool,
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ActiveFeature {
@@ -541,19 +548,21 @@ fn mouse_hiword(lparam: LPARAM) -> u16 {
 }
 
 fn simulate_key(key: Key, release: bool) -> Result<(), SimulateError> {
-    let vk = vk_from_key(key).ok_or(SimulateError)?;
-    let flags = if release {
-        KEYEVENTF_KEYUP
-    } else {
-        KEYBD_EVENT_FLAGS(0)
-    };
+    let scan = scan_from_key(key).ok_or(SimulateError)?;
+    let mut flags = KEYEVENTF_SCANCODE;
+    if release {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    if scan.extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
 
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(vk),
-                wScan: 0,
+                wVk: VIRTUAL_KEY(0),
+                wScan: scan.code,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
@@ -594,6 +603,134 @@ fn send_one(input: INPUT) -> Result<(), SimulateError> {
     } else {
         Err(SimulateError)
     }
+}
+
+fn scan_from_key(key: Key) -> Option<KeyScan> {
+    let (code, extended) = match key {
+        Key::Escape => (0x01, false),
+        Key::Num1 => (0x02, false),
+        Key::Num2 => (0x03, false),
+        Key::Num3 => (0x04, false),
+        Key::Num4 => (0x05, false),
+        Key::Num5 => (0x06, false),
+        Key::Num6 => (0x07, false),
+        Key::Num7 => (0x08, false),
+        Key::Num8 => (0x09, false),
+        Key::Num9 => (0x0A, false),
+        Key::Num0 => (0x0B, false),
+        Key::Minus => (0x0C, false),
+        Key::Equal => (0x0D, false),
+        Key::Backspace => (0x0E, false),
+        Key::Tab => (0x0F, false),
+        Key::KeyQ => (0x10, false),
+        Key::KeyW => (0x11, false),
+        Key::KeyE => (0x12, false),
+        Key::KeyR => (0x13, false),
+        Key::KeyT => (0x14, false),
+        Key::KeyY => (0x15, false),
+        Key::KeyU => (0x16, false),
+        Key::KeyI => (0x17, false),
+        Key::KeyO => (0x18, false),
+        Key::KeyP => (0x19, false),
+        Key::LeftBracket => (0x1A, false),
+        Key::RightBracket => (0x1B, false),
+        Key::Return => (0x1C, false),
+        Key::KpReturn => (0x1C, true),
+        Key::ControlLeft => (0x1D, false),
+        Key::ControlRight => (0x1D, true),
+        Key::KeyA => (0x1E, false),
+        Key::KeyS => (0x1F, false),
+        Key::KeyD => (0x20, false),
+        Key::KeyF => (0x21, false),
+        Key::KeyG => (0x22, false),
+        Key::KeyH => (0x23, false),
+        Key::KeyJ => (0x24, false),
+        Key::KeyK => (0x25, false),
+        Key::KeyL => (0x26, false),
+        Key::SemiColon => (0x27, false),
+        Key::Quote => (0x28, false),
+        Key::BackQuote => (0x29, false),
+        Key::ShiftLeft => (0x2A, false),
+        Key::BackSlash => (0x2B, false),
+        Key::KeyZ => (0x2C, false),
+        Key::KeyX => (0x2D, false),
+        Key::KeyC => (0x2E, false),
+        Key::KeyV => (0x2F, false),
+        Key::KeyB => (0x30, false),
+        Key::KeyN => (0x31, false),
+        Key::KeyM => (0x32, false),
+        Key::Comma => (0x33, false),
+        Key::Dot => (0x34, false),
+        Key::Slash => (0x35, false),
+        Key::KpDivide => (0x35, true),
+        Key::ShiftRight => (0x36, false),
+        Key::KpMultiply => (0x37, false),
+        Key::Alt => (0x38, false),
+        Key::AltGr => (0x38, true),
+        Key::Space => (0x39, false),
+        Key::CapsLock => (0x3A, false),
+        Key::F1 => (0x3B, false),
+        Key::F2 => (0x3C, false),
+        Key::F3 => (0x3D, false),
+        Key::F4 => (0x3E, false),
+        Key::F5 => (0x3F, false),
+        Key::F6 => (0x40, false),
+        Key::F7 => (0x41, false),
+        Key::F8 => (0x42, false),
+        Key::F9 => (0x43, false),
+        Key::F10 => (0x44, false),
+        Key::NumLock => (0x45, false),
+        Key::ScrollLock => (0x46, false),
+        Key::Kp7 => (0x47, false),
+        Key::Home => (0x47, true),
+        Key::Kp8 => (0x48, false),
+        Key::UpArrow => (0x48, true),
+        Key::Kp9 => (0x49, false),
+        Key::PageUp => (0x49, true),
+        Key::KpMinus => (0x4A, false),
+        Key::Kp4 => (0x4B, false),
+        Key::LeftArrow => (0x4B, true),
+        Key::Kp5 => (0x4C, false),
+        Key::Kp6 => (0x4D, false),
+        Key::RightArrow => (0x4D, true),
+        Key::KpPlus => (0x4E, false),
+        Key::Kp1 => (0x4F, false),
+        Key::End => (0x4F, true),
+        Key::Kp2 => (0x50, false),
+        Key::DownArrow => (0x50, true),
+        Key::Kp3 => (0x51, false),
+        Key::PageDown => (0x51, true),
+        Key::Kp0 => (0x52, false),
+        Key::Insert => (0x52, true),
+        Key::KpDelete => (0x53, false),
+        Key::Delete => (0x53, true),
+        Key::IntlBackslash => (0x56, false),
+        Key::F11 => (0x57, false),
+        Key::F12 => (0x58, false),
+        Key::MetaLeft => (0x5B, true),
+        Key::MetaRight => (0x5C, true),
+        Key::PrintScreen => (0x37, true),
+        Key::Pause => return None,
+        Key::Function => return None,
+        Key::Unknown(code) => {
+            return u16::try_from(code).ok().and_then(scan_from_vk);
+        }
+    };
+
+    Some(KeyScan { code, extended })
+}
+
+fn scan_from_vk(vk: u16) -> Option<KeyScan> {
+    let mapped = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC_EX) };
+    if mapped == 0 {
+        return None;
+    }
+
+    let extended = mapped & 0xff00 != 0;
+    Some(KeyScan {
+        code: (mapped & 0xff) as u16,
+        extended,
+    })
 }
 
 fn key_from_vk(code: u16) -> Key {
@@ -701,114 +838,5 @@ fn key_from_vk(code: u16) -> Key {
         105 => Key::Kp9,
         110 => Key::KpDelete,
         _ => Key::Unknown(u32::from(code)),
-    }
-}
-
-fn vk_from_key(key: Key) -> Option<u16> {
-    match key {
-        Key::Alt => Some(164),
-        Key::AltGr => Some(165),
-        Key::Backspace => Some(0x08),
-        Key::CapsLock => Some(20),
-        Key::ControlLeft => Some(162),
-        Key::ControlRight => Some(163),
-        Key::Delete => Some(46),
-        Key::DownArrow => Some(40),
-        Key::End => Some(35),
-        Key::Escape => Some(27),
-        Key::F1 => Some(112),
-        Key::F10 => Some(121),
-        Key::F11 => Some(122),
-        Key::F12 => Some(123),
-        Key::F2 => Some(113),
-        Key::F3 => Some(114),
-        Key::F4 => Some(115),
-        Key::F5 => Some(116),
-        Key::F6 => Some(117),
-        Key::F7 => Some(118),
-        Key::F8 => Some(119),
-        Key::F9 => Some(120),
-        Key::Home => Some(36),
-        Key::LeftArrow => Some(37),
-        Key::MetaLeft => Some(91),
-        Key::PageDown => Some(34),
-        Key::PageUp => Some(33),
-        Key::Return => Some(0x0D),
-        Key::RightArrow => Some(39),
-        Key::ShiftLeft => Some(160),
-        Key::ShiftRight => Some(161),
-        Key::Space => Some(32),
-        Key::Tab => Some(0x09),
-        Key::UpArrow => Some(38),
-        Key::PrintScreen => Some(44),
-        Key::ScrollLock => Some(145),
-        Key::Pause => Some(19),
-        Key::NumLock => Some(144),
-        Key::BackQuote => Some(192),
-        Key::Num1 => Some(49),
-        Key::Num2 => Some(50),
-        Key::Num3 => Some(51),
-        Key::Num4 => Some(52),
-        Key::Num5 => Some(53),
-        Key::Num6 => Some(54),
-        Key::Num7 => Some(55),
-        Key::Num8 => Some(56),
-        Key::Num9 => Some(57),
-        Key::Num0 => Some(48),
-        Key::Minus => Some(189),
-        Key::Equal => Some(187),
-        Key::KeyQ => Some(81),
-        Key::KeyW => Some(87),
-        Key::KeyE => Some(69),
-        Key::KeyR => Some(82),
-        Key::KeyT => Some(84),
-        Key::KeyY => Some(89),
-        Key::KeyU => Some(85),
-        Key::KeyI => Some(73),
-        Key::KeyO => Some(79),
-        Key::KeyP => Some(80),
-        Key::LeftBracket => Some(219),
-        Key::RightBracket => Some(221),
-        Key::KeyA => Some(65),
-        Key::KeyS => Some(83),
-        Key::KeyD => Some(68),
-        Key::KeyF => Some(70),
-        Key::KeyG => Some(71),
-        Key::KeyH => Some(72),
-        Key::KeyJ => Some(74),
-        Key::KeyK => Some(75),
-        Key::KeyL => Some(76),
-        Key::SemiColon => Some(186),
-        Key::Quote => Some(222),
-        Key::BackSlash => Some(220),
-        Key::IntlBackslash => Some(226),
-        Key::KeyZ => Some(90),
-        Key::KeyX => Some(88),
-        Key::KeyC => Some(67),
-        Key::KeyV => Some(86),
-        Key::KeyB => Some(66),
-        Key::KeyN => Some(78),
-        Key::KeyM => Some(77),
-        Key::Comma => Some(188),
-        Key::Dot => Some(190),
-        Key::Slash => Some(191),
-        Key::Insert => Some(45),
-        Key::KpMinus => Some(109),
-        Key::KpPlus => Some(107),
-        Key::KpMultiply => Some(106),
-        Key::KpDivide => Some(111),
-        Key::Kp0 => Some(96),
-        Key::Kp1 => Some(97),
-        Key::Kp2 => Some(98),
-        Key::Kp3 => Some(99),
-        Key::Kp4 => Some(100),
-        Key::Kp5 => Some(101),
-        Key::Kp6 => Some(102),
-        Key::Kp7 => Some(103),
-        Key::Kp8 => Some(104),
-        Key::Kp9 => Some(105),
-        Key::KpDelete => Some(110),
-        Key::Unknown(code) => u16::try_from(code).ok(),
-        Key::MetaRight | Key::KpReturn | Key::Function => None,
     }
 }

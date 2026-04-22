@@ -23,6 +23,7 @@ struct AppState {
     clicker: Arc<ClickerRuntime>,
     recorder: Arc<RecorderRuntime>,
     show_window_on_global_hotkey_stop: AtomicBool,
+    auto_hide_on_hotkey: AtomicBool,
     playback_speed: Mutex<f64>,
     loop_playback: AtomicBool,
 }
@@ -34,12 +35,14 @@ impl AppState {
         let show_window_on_stop = self
             .show_window_on_global_hotkey_stop
             .load(Ordering::SeqCst);
+        let auto_hide_on_hotkey = self.auto_hide_on_hotkey.load(Ordering::SeqCst);
         let playback_speed = self.playback_speed.lock().map(|s| *s).unwrap_or(1.0);
 
         let config = AppConfig {
             clicker: clicker_config,
             record_hotkey,
             show_window_on_stop,
+            auto_hide_on_hotkey,
             playback_speed,
             loop_playback: self.loop_playback.load(Ordering::SeqCst),
         };
@@ -51,6 +54,7 @@ impl AppState {
 #[serde(rename_all = "camelCase")]
 struct GlobalHotkeyOptions {
     show_window_on_stop: bool,
+    auto_hide_on_hotkey: bool,
 }
 
 #[tauri::command]
@@ -106,6 +110,7 @@ fn get_global_hotkey_options(
         show_window_on_stop: state
             .show_window_on_global_hotkey_stop
             .load(Ordering::SeqCst),
+        auto_hide_on_hotkey: state.auto_hide_on_hotkey.load(Ordering::SeqCst),
     })
 }
 
@@ -117,6 +122,9 @@ fn update_global_hotkey_options(
     state
         .show_window_on_global_hotkey_stop
         .store(options.show_window_on_stop, Ordering::SeqCst);
+    state
+        .auto_hide_on_hotkey
+        .store(options.auto_hide_on_hotkey, Ordering::SeqCst);
     state.persist_config();
     Ok(options)
 }
@@ -266,6 +274,7 @@ fn handle_global_event(state: &Arc<AppState>, app: &tauri::AppHandle, event: Eve
     let show_window_on_global_hotkey_stop = state
         .show_window_on_global_hotkey_stop
         .load(Ordering::SeqCst);
+    let auto_hide_on_hotkey = state.auto_hide_on_hotkey.load(Ordering::SeqCst);
 
     let playback_speed = state.playback_speed.lock().map(|s| *s).unwrap_or(1.0);
 
@@ -274,6 +283,7 @@ fn handle_global_event(state: &Arc<AppState>, app: &tauri::AppHandle, event: Eve
         app,
         active_feature == ActiveFeature::Clicker,
         show_window_on_global_hotkey_stop,
+        auto_hide_on_hotkey,
     );
     state.recorder.handle_event(
         &event,
@@ -281,6 +291,7 @@ fn handle_global_event(state: &Arc<AppState>, app: &tauri::AppHandle, event: Eve
         &hotkey,
         active_feature == ActiveFeature::Recorder,
         show_window_on_global_hotkey_stop,
+        auto_hide_on_hotkey,
         playback_speed,
         state.loop_playback.load(Ordering::SeqCst),
     );
@@ -297,6 +308,7 @@ pub fn run() {
         clicker: clicker.clone(),
         recorder: recorder.clone(),
         show_window_on_global_hotkey_stop: AtomicBool::new(config.show_window_on_stop),
+        auto_hide_on_hotkey: AtomicBool::new(config.auto_hide_on_hotkey),
         playback_speed: Mutex::new(config.playback_speed),
         loop_playback: AtomicBool::new(config.loop_playback),
     });

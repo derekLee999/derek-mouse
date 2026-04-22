@@ -199,10 +199,11 @@ impl ClickerRuntime {
         app: &tauri::AppHandle,
         active: bool,
         show_window_on_stop: bool,
+        auto_hide_on_hotkey: bool,
     ) {
         match event.event_type {
             EventType::KeyPress(key) => {
-                self.handle_key_press(app, key, active, show_window_on_stop)
+                self.handle_key_press(app, key, active, show_window_on_stop, auto_hide_on_hotkey)
             }
             EventType::KeyRelease(key) => self.handle_key_release(key),
             EventType::ButtonPress(button) => self.handle_button_press(button, app),
@@ -232,6 +233,7 @@ impl ClickerRuntime {
         key: Key,
         active: bool,
         show_window_on_stop: bool,
+        auto_hide_on_hotkey: bool,
     ) {
         let hotkey = self.hotkey_config();
         let triggered = {
@@ -250,7 +252,9 @@ impl ClickerRuntime {
         }
 
         let was_running = self.running.load(Ordering::SeqCst);
-        hide_main_window(app);
+        if auto_hide_on_hotkey {
+            hide_main_window(app);
+        }
         let next_running = !self.running.load(Ordering::SeqCst);
         self.running.store(next_running, Ordering::SeqCst);
         if !next_running {

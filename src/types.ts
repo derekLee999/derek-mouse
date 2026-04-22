@@ -9,6 +9,7 @@ export type HotkeyConfig = {
 
 export type GlobalHotkeyOptions = {
   showWindowOnStop: boolean;
+  autoHideOnHotkey: boolean;
 };
 
 export type ClickerConfig = {

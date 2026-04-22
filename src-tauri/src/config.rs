@@ -13,6 +13,8 @@ pub struct AppConfig {
     pub record_hotkey: HotkeyConfig,
     #[serde(default = "default_true")]
     pub show_window_on_stop: bool,
+    #[serde(default = "default_true")]
+    pub auto_hide_on_hotkey: bool,
     #[serde(default = "default_speed")]
     pub playback_speed: f64,
     #[serde(default)]
@@ -41,6 +43,7 @@ impl Default for AppConfig {
             clicker: ClickerConfig::default(),
             record_hotkey: default_record_hotkey(),
             show_window_on_stop: true,
+            auto_hide_on_hotkey: true,
             playback_speed: 1.0,
             loop_playback: false,
         }
