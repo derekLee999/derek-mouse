@@ -243,6 +243,7 @@ impl RecorderRuntime {
         tray::set_status(TrayStatus::Stopped);
 
         if let Some(session) = session {
+            let cleaned_events = clean_recorded_events(session.events);
             let recording = Recording {
                 id: session.id,
                 name: session.name,
@@ -250,7 +251,7 @@ impl RecorderRuntime {
                 updated_at: session.created_at,
                 playback_speed: 1.0,
                 loop_playback: false,
-                events: session.events,
+                events: cleaned_events,
             };
             let id = recording.id;
 
@@ -681,6 +682,259 @@ fn unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn clean_recorded_events(events: Vec<TimedEvent>) -> Vec<TimedEvent> {
+    let events = remove_mouse_jitter(events, 3.0);
+    let events = merge_continuous_mouse_moves(events);
+    let events = remove_redundant_events(events);
+    normalize_event_delays(events)
+}
+
+fn remove_mouse_jitter(events: Vec<TimedEvent>, threshold_px: f64) -> Vec<TimedEvent> {
+    let mut cleaned = Vec::with_capacity(events.len());
+    let mut pending_delay = 0_u64;
+    let mut last_kept_move: Option<(f64, f64)> = None;
+
+    for mut event in events {
+        event.delay_ms = event.delay_ms.saturating_add(pending_delay);
+        pending_delay = 0;
+
+        if let EventType::MouseMove { x, y } = event.event_type {
+            if let Some((lx, ly)) = last_kept_move {
+                let dx = x - lx;
+                let dy = y - ly;
+                let distance = (dx * dx + dy * dy).sqrt();
+                if distance < threshold_px {
+                    pending_delay = pending_delay.saturating_add(event.delay_ms);
+                    continue;
+                }
+            }
+            last_kept_move = Some((x, y));
+        }
+
+        cleaned.push(event);
+    }
+
+    cleaned
+}
+
+fn merge_continuous_mouse_moves(events: Vec<TimedEvent>) -> Vec<TimedEvent> {
+    let mut merged = Vec::with_capacity(events.len());
+    let mut index = 0;
+
+    while index < events.len() {
+        if !matches!(events[index].event_type, EventType::MouseMove { .. }) {
+            merged.push(events[index].clone());
+            index += 1;
+            continue;
+        }
+
+        let mut end = index;
+        while end < events.len() && matches!(events[end].event_type, EventType::MouseMove { .. }) {
+            end += 1;
+        }
+
+        let run = &events[index..end];
+        if run.len() < 3 {
+            merged.extend(run.iter().cloned());
+        } else {
+            let smoothed = smooth_move_run(run);
+            if smoothed.is_empty() {
+                merged.extend(run.iter().cloned());
+            } else {
+                merged.extend(smoothed);
+            }
+        }
+
+        index = end;
+    }
+
+    merged
+}
+
+fn smooth_move_run(run: &[TimedEvent]) -> Vec<TimedEvent> {
+    let (sx, sy) = match run.first().map(|event| event.event_type) {
+        Some(EventType::MouseMove { x, y }) => (x, y),
+        _ => return Vec::new(),
+    };
+
+    let (ex, ey) = match run.last().map(|event| event.event_type) {
+        Some(EventType::MouseMove { x, y }) => (x, y),
+        _ => return Vec::new(),
+    };
+
+    let mut path_length = 0.0_f64;
+    let mut previous = (sx, sy);
+    let mut sum_x = 0.0_f64;
+    let mut sum_y = 0.0_f64;
+
+    for event in run {
+        if let EventType::MouseMove { x, y } = event.event_type {
+            let dx = x - previous.0;
+            let dy = y - previous.1;
+            path_length += (dx * dx + dy * dy).sqrt();
+            previous = (x, y);
+            sum_x += x;
+            sum_y += y;
+        }
+    }
+
+    let total_delay: u64 = run.iter().map(|event| event.delay_ms).sum();
+    if path_length < 6.0 {
+        return vec![TimedEvent {
+            delay_ms: total_delay,
+            event_type: EventType::MouseMove { x: ex, y: ey },
+        }];
+    }
+
+    let mid = run[run.len() / 2].event_type;
+    let (mx, my) = match mid {
+        EventType::MouseMove { x, y } => (x, y),
+        _ => ((sx + ex) / 2.0, (sy + ey) / 2.0),
+    };
+
+    let count = run.len() as f64;
+    let avg = (sum_x / count, sum_y / count);
+    let control = ((mx + avg.0) / 2.0, (my + avg.1) / 2.0);
+
+    let target_samples = ((path_length / 12.0).round() as usize).clamp(2, run.len().min(12));
+    let mut points: Vec<(f64, f64)> = Vec::with_capacity(target_samples + 1);
+
+    for step in 1..=target_samples {
+        let t = step as f64 / target_samples as f64;
+        let inv = 1.0 - t;
+        let x = inv * inv * sx + 2.0 * inv * t * control.0 + t * t * ex;
+        let y = inv * inv * sy + 2.0 * inv * t * control.1 + t * t * ey;
+
+        if let Some((lx, ly)) = points.last().copied() {
+            let dx = x - lx;
+            let dy = y - ly;
+            if (dx * dx + dy * dy).sqrt() < 1.0 {
+                continue;
+            }
+        }
+
+        points.push((x, y));
+    }
+
+    if points
+        .last()
+        .map(|(x, y)| (x - ex).abs() > f64::EPSILON || (y - ey).abs() > f64::EPSILON)
+        .unwrap_or(true)
+    {
+        points.push((ex, ey));
+    }
+
+    if points.is_empty() {
+        return Vec::new();
+    }
+
+    let slice_count = points.len() as u64;
+    let base_delay = total_delay / slice_count;
+    let remainder = total_delay % slice_count;
+
+    points
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (x, y))| TimedEvent {
+            delay_ms: base_delay + if idx == 0 { remainder } else { 0 },
+            event_type: EventType::MouseMove { x, y },
+        })
+        .collect()
+}
+
+fn remove_redundant_events(events: Vec<TimedEvent>) -> Vec<TimedEvent> {
+    let mut optimized = Vec::with_capacity(events.len());
+    let mut pending_delay = 0_u64;
+    let mut pressed_keys: HashSet<Key> = HashSet::new();
+    let mut pressed_buttons: HashSet<crate::input::Button> = HashSet::new();
+    let mut last_move: Option<(f64, f64)> = None;
+
+    for mut event in events {
+        event.delay_ms = event.delay_ms.saturating_add(pending_delay);
+        pending_delay = 0;
+
+        let mut drop_event = false;
+        match event.event_type {
+            EventType::KeyPress(key) => {
+                if !pressed_keys.insert(key) {
+                    drop_event = true;
+                }
+                last_move = None;
+            }
+            EventType::KeyRelease(key) => {
+                if !pressed_keys.remove(&key) {
+                    drop_event = true;
+                }
+                last_move = None;
+            }
+            EventType::ButtonPress(button) => {
+                if !pressed_buttons.insert(button) {
+                    drop_event = true;
+                }
+                last_move = None;
+            }
+            EventType::ButtonRelease(button) => {
+                if !pressed_buttons.remove(&button) {
+                    drop_event = true;
+                }
+                last_move = None;
+            }
+            EventType::Wheel { delta_x, delta_y } => {
+                if delta_x == 0 && delta_y == 0 {
+                    drop_event = true;
+                }
+                last_move = None;
+            }
+            EventType::MouseMove { x, y } => {
+                if let Some((lx, ly)) = last_move {
+                    if (x - lx).abs() < f64::EPSILON && (y - ly).abs() < f64::EPSILON {
+                        drop_event = true;
+                    }
+                }
+                last_move = Some((x, y));
+            }
+        }
+
+        if drop_event {
+            pending_delay = pending_delay.saturating_add(event.delay_ms);
+            continue;
+        }
+
+        optimized.push(event);
+    }
+
+    optimized
+}
+
+fn normalize_event_delays(events: Vec<TimedEvent>) -> Vec<TimedEvent> {
+    events
+        .into_iter()
+        .map(|mut event| {
+            event.delay_ms = normalize_delay_ms(event.delay_ms);
+            event
+        })
+        .collect()
+}
+
+fn normalize_delay_ms(delay_ms: u64) -> u64 {
+    if delay_ms <= 20 {
+        return delay_ms;
+    }
+
+    if delay_ms <= 200 {
+        return round_to_step(delay_ms, 5);
+    }
+
+    round_to_step(delay_ms, 10)
+}
+
+fn round_to_step(value: u64, step: u64) -> u64 {
+    if step == 0 {
+        return value;
+    }
+    ((value + step / 2) / step) * step
 }
 
 fn default_recording_name(created_at: u64) -> String {
