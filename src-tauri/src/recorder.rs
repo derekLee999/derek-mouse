@@ -201,6 +201,14 @@ impl RecorderRuntime {
             })
     }
 
+    pub fn is_recording(&self) -> bool {
+        self.recording.load(Ordering::SeqCst)
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.playing.load(Ordering::SeqCst)
+    }
+
     pub fn update_record_hotkey(
         &self,
         mut hotkey: HotkeyConfig,

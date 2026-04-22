@@ -46,6 +46,26 @@ impl AppState {
         };
         save_config(&config);
     }
+
+    fn sync_tray_status(&self) {
+        let active_feature = self
+            .active_feature
+            .lock()
+            .map(|feature| *feature)
+            .unwrap_or(ActiveFeature::Clicker);
+
+        let status = if self.recorder.is_recording() {
+            tray::TrayStatus::Recording
+        } else if self.recorder.is_playing() || self.clicker.is_running() {
+            tray::TrayStatus::Running
+        } else if active_feature == ActiveFeature::Recorder {
+            tray::TrayStatus::ReadyToRecord
+        } else {
+            tray::TrayStatus::Stopped
+        };
+
+        tray::set_status(status);
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -62,6 +82,7 @@ fn set_active_feature(
 ) -> Result<(), String> {
     *state.active_feature.lock().map_err(|err| err.to_string())? =
         ActiveFeature::from_name(&feature);
+    state.sync_tray_status();
     Ok(())
 }
 
@@ -149,12 +170,16 @@ fn update_recorder_hotkey_config(
 
 #[tauri::command]
 fn start_clicker(state: tauri::State<'_, Arc<AppState>>) -> Result<clicker::ClickerState, String> {
-    Ok(state.clicker.start())
+    let result = state.clicker.start();
+    state.sync_tray_status();
+    Ok(result)
 }
 
 #[tauri::command]
 fn stop_clicker(state: tauri::State<'_, Arc<AppState>>) -> Result<clicker::ClickerState, String> {
-    Ok(state.clicker.stop())
+    let result = state.clicker.stop();
+    state.sync_tray_status();
+    Ok(result)
 }
 
 #[tauri::command]
@@ -176,14 +201,18 @@ fn get_recording_detail(
 fn start_recording(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<recorder::RecorderState, String> {
-    state.recorder.start_recording()
+    let result = state.recorder.start_recording();
+    state.sync_tray_status();
+    result
 }
 
 #[tauri::command]
 fn stop_recording(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<recorder::RecorderState, String> {
-    state.recorder.stop_recording()
+    let result = state.recorder.stop_recording();
+    state.sync_tray_status();
+    result
 }
 
 #[tauri::command]
@@ -208,14 +237,18 @@ fn play_recording(
     state: tauri::State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
 ) -> Result<recorder::RecorderState, String> {
-    state.recorder.play_recording(id, app, false)
+    let result = state.recorder.play_recording(id, app, false);
+    state.sync_tray_status();
+    result
 }
 
 #[tauri::command]
 fn stop_playback(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<recorder::RecorderState, String> {
-    state.recorder.stop_playback()
+    let result = state.recorder.stop_playback();
+    state.sync_tray_status();
+    result
 }
 
 #[tauri::command]
@@ -292,6 +325,7 @@ fn handle_global_event(state: &Arc<AppState>, app: &tauri::AppHandle, event: Eve
         show_window_on_global_hotkey_stop,
         auto_hide_on_hotkey,
     );
+    state.sync_tray_status();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -323,6 +357,7 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle().clone();
             tray::init(&app_handle)?;
+            state.sync_tray_status();
             clicker.spawn_worker(app_handle.clone());
             spawn_global_listener(state.clone(), app_handle);
             Ok(())

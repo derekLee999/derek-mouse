@@ -137,6 +137,10 @@ impl ClickerRuntime {
             .unwrap_or_default()
     }
 
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
     pub fn spawn_worker(self: &Arc<Self>, app: tauri::AppHandle) {
         let runtime = self.clone();
 
