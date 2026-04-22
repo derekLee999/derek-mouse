@@ -215,7 +215,7 @@ function openRecordingMenu(event: MouseEvent, recording: RecordingSummary) {
   closeSpeedMenu();
 
   const menuWidth = 132;
-  const menuHeight = 112;
+  const menuHeight = 76;
   recordingMenu.value = {
     visible: true,
     x: Math.min(event.clientX, window.innerWidth - menuWidth - 8),
@@ -240,14 +240,6 @@ function closeFloatingMenus() {
 function handleDocumentKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     closeFloatingMenus();
-  }
-}
-
-async function handleMenuRename() {
-  const recording = recordingMenu.value.recording;
-  closeRecordingMenu();
-  if (recording) {
-    await beginRename(recording);
   }
 }
 
@@ -284,9 +276,9 @@ async function handleMenuEdit() {
     url: `/index.html?view=recording-editor&id=${recording.id}`,
     title: "编辑",
     width: 880,
-    height: 640,
+    height: 806,
     minWidth: 760,
-    minHeight: 520,
+    minHeight: 655,
     center: true,
     resizable: true,
     decorations: false,
@@ -515,7 +507,7 @@ function formatTime(timestamp: number) {
             @blur="commitRename"
           />
           <div v-else class="recording-name-row">
-            <strong>{{ recording.name }}</strong>
+            <strong @dblclick.stop="beginRename(recording)">{{ recording.name }}</strong>
             <div
               v-if="recording.id === state.selectedId"
               class="recording-tags"
@@ -564,11 +556,8 @@ function formatTime(timestamp: number) {
       @mousedown.stop
       @contextmenu.prevent
     >
-      <button type="button" class="context-menu-item" @click="handleMenuRename">
-        编辑名称
-      </button>
       <button type="button" class="context-menu-item" @click="handleMenuEdit">
-        编辑方案
+        编辑
       </button>
       <button type="button" class="context-menu-item danger" @click="handleMenuDelete">
         删除

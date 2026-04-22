@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Close, Delete, DocumentChecked, Top } from "@element-plus/icons-vue";
+import { Aim, Close, Delete, DocumentChecked, Remove, Top } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import type { RecordingDetail, RecordingEventSummary, RecorderState } from "../../types";
 
@@ -17,6 +17,7 @@ const loading = ref(true);
 const saving = ref(false);
 const recording = ref<RecordingDetail | null>(null);
 const events = ref<RecordingEventSummary[]>([]);
+const eventListRef = ref<HTMLElement | null>(null);
 const selectedEventIndices = ref<Set<number>>(new Set());
 const removedEventIndices = ref<Set<number>>(new Set());
 const activeEventIndex = ref<number | null>(null);
@@ -33,6 +34,15 @@ const eventMenu = ref<{
   x: 0,
   y: 0,
   event: null,
+});
+const operationMenu = ref<{
+  visible: boolean;
+  x: number;
+  y: number;
+}>({
+  visible: false,
+  x: 0,
+  y: 0,
 });
 
 let unlistenClose: UnlistenFn | undefined;
@@ -56,6 +66,10 @@ const nextCriticalEvent = computed(() => {
   }
   return events.value.slice(activeEventPosition.value + 1).find((event) => event.critical) ?? null;
 });
+const shouldShowUpdatedAt = computed(() => {
+  if (!recording.value) return false;
+  return recording.value.updatedAt !== recording.value.createdAt;
+});
 
 onMounted(async () => {
   unlistenClose = await currentWindow.onCloseRequested(async (event) => {
@@ -67,13 +81,13 @@ onMounted(async () => {
 
   alwaysOnTop.value = await currentWindow.isAlwaysOnTop();
   await loadRecording();
-  document.addEventListener("click", closeEventMenu);
+  document.addEventListener("click", closeFloatingMenus);
   document.addEventListener("keydown", handleDocumentKeydown);
 });
 
 onBeforeUnmount(() => {
   unlistenClose?.();
-  document.removeEventListener("click", closeEventMenu);
+  document.removeEventListener("click", closeFloatingMenus);
   document.removeEventListener("keydown", handleDocumentKeydown);
 });
 
@@ -180,6 +194,7 @@ async function deleteEvents(indices: number[]) {
 
 function openEventMenu(event: MouseEvent, recordingEvent: RecordingEventSummary) {
   event.preventDefault();
+  closeOperationMenu();
 
   const menuWidth = 112;
   const menuHeight = 42;
@@ -195,9 +210,38 @@ function closeEventMenu() {
   eventMenu.value.visible = false;
 }
 
+function openOperationMenu(event: MouseEvent) {
+  event.preventDefault();
+  closeEventMenu();
+
+  const menuWidth = 132;
+  const menuHeight = 132;
+  const margin = 8;
+  const maxX = Math.max(margin, window.innerWidth - menuWidth - margin);
+  const maxY = Math.max(margin, window.innerHeight - menuHeight - margin);
+  operationMenu.value = {
+    visible: true,
+    x: Math.min(Math.max(event.clientX, margin), maxX),
+    y: Math.min(Math.max(event.clientY, margin), maxY),
+  };
+}
+
+function closeOperationMenu() {
+  operationMenu.value.visible = false;
+}
+
+function closeFloatingMenus() {
+  closeEventMenu();
+  closeOperationMenu();
+}
+
 function handleDocumentKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
-    closeEventMenu();
+    closeFloatingMenus();
+    if (!closeConfirmVisible.value) {
+      event.preventDefault();
+      void requestCloseWindow();
+    }
   }
 }
 
@@ -205,19 +249,41 @@ async function deleteEventFromMenu() {
   const event = eventMenu.value.event;
   if (!event) return;
 
+  closeEventMenu();
   await deleteEvents([event.index]);
 }
 
 function selectCriticalEvent(event: RecordingEventSummary | null) {
   if (!event) return;
 
+  closeOperationMenu();
   activeEventIndex.value = event.index;
+  scrollToEvent(event.index);
+}
+
+function scrollToEvent(index: number) {
   requestAnimationFrame(() => {
     const target = document.querySelector<HTMLElement>(
-      `[data-event-index="${event.index}"]`,
+      `[data-event-index="${index}"]`,
     );
     target?.scrollIntoView({ block: "center", behavior: "auto" });
   });
+}
+
+function scrollToActiveEvent() {
+  if (activeEventIndex.value === null) return;
+
+  closeOperationMenu();
+  scrollToEvent(activeEventIndex.value);
+}
+
+function clearSelectedEvents() {
+  selectedEventIndices.value = new Set();
+}
+
+function scrollEventListToTop() {
+  closeOperationMenu();
+  eventListRef.value?.scrollTo({ top: 0, behavior: "auto" });
 }
 
 async function saveRecording() {
@@ -306,6 +372,15 @@ async function startWindowDrag() {
 function formatDelay(ms: number) {
   return `${(ms / 1000).toFixed(3)}s`;
 }
+
+function formatDuration(ms: number) {
+  return `${(ms / 1000).toFixed(2)} 秒`;
+}
+
+function formatTime(timestamp: number | undefined) {
+  if (!timestamp) return "--";
+  return new Date(timestamp).toLocaleString();
+}
 </script>
 
 <template>
@@ -313,9 +388,27 @@ function formatDelay(ms: number) {
     <header class="titlebar" @mousedown="startWindowDrag">
       <div class="titlebar-title">
         <img src="/app-icon.png" alt="" class="titlebar-icon" />
-        <span>编辑</span>
+        <span>编辑 - 优化方案  【事件：{{ eventCount }} &nbsp;&nbsp;时长：{{ recording ? formatDuration(recording.durationMs) : "--" }}】</span>
+        <div class="titlebar-tags">
+          <el-tag class="selected-tag" type="success" effect="light" size="small">
+            已选 {{ selectedCount }}
+          </el-tag>
+          <el-tag v-if="hasRemovedEvents" class="removed-tag" type="danger" effect="light" size="small">
+            已删除 {{ removedEventIndices.size }}
+          </el-tag>
+        </div>
       </div>
       <div class="window-actions" @mousedown.stop>
+        <button
+          class="window-action"
+          type="button"
+          title="保存"
+          aria-label="保存"
+          :disabled="loading || saving || !hasRemovedEvents"
+          @click="saveRecording"
+        >
+          <el-icon><DocumentChecked /></el-icon>
+        </button>
         <button
           class="window-action"
           :class="{ active: alwaysOnTop }"
@@ -339,43 +432,17 @@ function formatDelay(ms: number) {
     </header>
 
     <header class="editor-header">
-      <div>
+      <div class="recording-title-block">
         <strong>{{ recording?.name ?? "编辑方案" }}</strong>
-        <span>{{ eventCount }} 个事件</span>
+        <div class="recording-summary">
+          <span><b>创建</b>{{ formatTime(recording?.createdAt) }}</span>
+          <span v-if="shouldShowUpdatedAt"><b>最后修改</b>{{ formatTime(recording?.updatedAt) }}</span>
+        </div>
       </div>
-      <el-tag v-if="hasRemovedEvents" type="warning" size="small">
-        已删除 {{ removedEventIndices.size }}
-      </el-tag>
     </header>
 
-    <section class="editor-toolbar">
-      <div class="selection-state">
-        已选 {{ selectedCount }}
-      </div>
-      <div class="toolbar-actions">
-        <el-button
-          type="danger"
-          plain
-          :icon="Delete"
-          :disabled="loading || selectedCount === 0"
-          @click="deleteSelectedEvents"
-        >
-          删除
-        </el-button>
-        <el-button
-          type="primary"
-          :icon="DocumentChecked"
-          :loading="saving"
-          :disabled="loading || !hasRemovedEvents"
-          @click="saveRecording"
-        >
-          保存
-        </el-button>
-      </div>
-    </section>
-
     <section v-loading="loading" class="event-workspace">
-      <div class="event-list">
+      <div ref="eventListRef" class="event-list">
         <el-empty v-if="!loading && events.length === 0" description="没有事件" />
         <button
           v-for="event in events"
@@ -405,25 +472,99 @@ function formatDelay(ms: number) {
         </button>
       </div>
 
-      <aside class="event-operation-panel">
-        <el-button
-          type="primary"
-          plain
-          :disabled="previousCriticalEvent === null"
-          @click="selectCriticalEvent(previousCriticalEvent)"
+      <aside class="event-operation-panel" @contextmenu="openOperationMenu">
+        <el-dropdown
+          trigger="hover"
+          :disabled="previousCriticalEvent === null && nextCriticalEvent === null"
         >
-          上一个
+          <el-button
+            type="primary"
+            plain
+            :class="{ 'critical-dropdown-disabled': previousCriticalEvent === null && nextCriticalEvent === null }"
+          >
+            查找关键操作
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item
+                :disabled="previousCriticalEvent === null"
+                @click="selectCriticalEvent(previousCriticalEvent)"
+              >
+                上一个
+              </el-dropdown-item>
+              <el-dropdown-item
+                :disabled="nextCriticalEvent === null"
+                @click="selectCriticalEvent(nextCriticalEvent)"
+              >
+                下一个
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-button
+          type="danger"
+          plain
+          :icon="Delete"
+          :disabled="loading || selectedCount === 0"
+          @click="deleteSelectedEvents"
+        >
+          删除选择项
         </el-button>
         <el-button
-          type="primary"
           plain
-          :disabled="nextCriticalEvent === null"
-          @click="selectCriticalEvent(nextCriticalEvent)"
+          :icon="Remove"
+          :disabled="selectedCount === 0"
+          @click="clearSelectedEvents"
         >
-          下一个
+          取消已选择
+        </el-button>
+        <el-button
+          plain
+          :icon="Aim"
+          :disabled="activeEventIndex === null"
+          @click="scrollToActiveEvent"
+        >
+          定位到选中
         </el-button>
       </aside>
     </section>
+
+    <div
+      v-if="operationMenu.visible"
+      class="operation-context-menu"
+      :style="{ left: `${operationMenu.x}px`, top: `${operationMenu.y}px` }"
+      @click.stop
+      @mousedown.stop
+      @contextmenu.prevent
+    >
+      <button
+        type="button"
+        class="operation-context-item"
+        :disabled="previousCriticalEvent === null"
+        @click="selectCriticalEvent(previousCriticalEvent)"
+      >
+        上一个关键操作
+      </button>
+      <button
+        type="button"
+        class="operation-context-item"
+        :disabled="nextCriticalEvent === null"
+        @click="selectCriticalEvent(nextCriticalEvent)"
+      >
+        下一个关键操作
+      </button>
+      <button
+        type="button"
+        class="operation-context-item"
+        :disabled="activeEventIndex === null"
+        @click="scrollToActiveEvent"
+      >
+        定位到选中
+      </button>
+      <button type="button" class="operation-context-item" @click="scrollEventListToTop">
+        滚动到顶部
+      </button>
+    </div>
 
     <div
       v-if="eventMenu.visible"
@@ -467,7 +608,7 @@ function formatDelay(ms: number) {
 <style scoped>
 .editor-shell {
   display: grid;
-  grid-template-rows: 36px auto auto minmax(0, 1fr);
+  grid-template-rows: 36px auto minmax(0, 1fr);
   gap: 12px;
   height: 100vh;
   padding: 0 18px 18px;
@@ -539,6 +680,13 @@ function formatDelay(ms: number) {
   background: var(--el-fill-color-light);
 }
 
+.window-action:disabled,
+.window-action:disabled:hover {
+  color: var(--el-text-color-placeholder);
+  background: transparent;
+  cursor: not-allowed;
+}
+
 .window-action.active {
   color: #ffffff;
   background: var(--el-color-primary);
@@ -556,20 +704,24 @@ function formatDelay(ms: number) {
 }
 
 .editor-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   min-width: 0;
 }
 
-.editor-header div {
-  display: grid;
-  gap: 3px;
+.recording-title-block {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
   min-width: 0;
 }
 
 .editor-header strong {
+  flex: 0 1 auto;
+  min-width: 160px;
   overflow: hidden;
   font-size: 18px;
   font-weight: 700;
@@ -577,39 +729,55 @@ function formatDelay(ms: number) {
   white-space: nowrap;
 }
 
-.editor-header span {
+.recording-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.recording-summary span {
+  display: inline-flex;
+  gap: 4px;
+  align-items: baseline;
   color: var(--el-text-color-secondary);
   font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
-.editor-toolbar {
-  display: flex;
+.recording-summary b {
+  color: var(--el-text-color-placeholder);
+  font-weight: 600;
+}
+
+.titlebar-tags {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 48px;
-  padding: 8px 10px;
-  background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
 }
 
-.selection-state {
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
+.selected-tag {
   font-weight: 700;
-  min-width: 120px;
 }
 
-.toolbar-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
+.removed-tag {
+  --el-tag-bg-color: var(--el-color-danger-light-9);
+  --el-tag-border-color: var(--el-color-danger-light-5);
+  --el-tag-text-color: var(--el-color-danger);
+  color: var(--el-color-danger);
+  font-weight: 700;
+}
+
+.removed-tag :deep(.el-tag__content) {
+  color: var(--el-color-danger);
 }
 
 .event-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 116px;
+  grid-template-columns: minmax(0, 1fr) 136px;
   gap: 10px;
   min-height: 0;
 }
@@ -647,16 +815,16 @@ function formatDelay(ms: number) {
 }
 
 .event-row.checked {
-  border-color: var(--el-color-success-light-5);
-  background: var(--el-color-success-light-9);
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
 }
 
 .event-row.active,
 .event-row.active:hover,
 .event-row.active.checked {
-  border-color: var(--el-color-primary-light-5);
-  background: var(--el-color-primary-light-9);
-  box-shadow: inset 3px 0 0 var(--el-color-primary);
+  border-color: var(--el-color-success-light-5);
+  background: var(--el-color-success-light-9);
+  box-shadow: inset 3px 0 0 var(--el-color-success);
 }
 
 .event-index {
@@ -700,9 +868,63 @@ function formatDelay(ms: number) {
   border-radius: 8px;
 }
 
+.event-operation-panel :deep(.el-dropdown),
 .event-operation-panel :deep(.el-button) {
   width: 100%;
+}
+
+.event-operation-panel :deep(.el-button) {
   margin-left: 0;
+}
+
+.event-operation-panel :deep(.critical-dropdown-disabled) {
+  color: var(--el-text-color-placeholder);
+  background: var(--el-fill-color-light);
+  border-color: var(--el-border-color-lighter);
+  cursor: not-allowed;
+}
+
+.event-operation-panel :deep(.critical-dropdown-disabled:hover),
+.event-operation-panel :deep(.critical-dropdown-disabled:focus) {
+  color: var(--el-text-color-placeholder);
+  background: var(--el-fill-color-light);
+  border-color: var(--el-border-color-lighter);
+}
+
+.operation-context-menu {
+  position: fixed;
+  z-index: 4000;
+  display: grid;
+  width: 132px;
+  padding: 6px;
+  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  box-shadow: var(--el-box-shadow-light);
+}
+
+.operation-context-item {
+  height: 30px;
+  padding: 0 10px;
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.operation-context-item:hover {
+  color: var(--el-color-primary);
+  background: var(--el-fill-color-light);
+}
+
+.operation-context-item:disabled,
+.operation-context-item:disabled:hover {
+  color: var(--el-text-color-placeholder);
+  background: transparent;
+  cursor: not-allowed;
 }
 
 .event-context-menu {

@@ -52,6 +52,7 @@ export type RecordingDetail = {
   loopPlayback: boolean;
   createdAt: number;
   updatedAt: number;
+  durationMs: number;
   events: RecordingEventSummary[];
 };
 

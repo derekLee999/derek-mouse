@@ -60,6 +60,7 @@ pub struct RecordingDetail {
     loop_playback: bool,
     created_at: u64,
     updated_at: u64,
+    duration_ms: u64,
     events: Vec<RecordingEventSummary>,
 }
 
@@ -181,6 +182,7 @@ impl RecorderRuntime {
             loop_playback: recording.loop_playback,
             created_at: recording.created_at,
             updated_at: recording.updated_at,
+            duration_ms: recording_duration_ms(&recording.events),
             events: recording
                 .events
                 .iter()
@@ -659,7 +661,7 @@ impl RecorderRuntime {
                 created_at: recording.created_at,
                 updated_at: recording.updated_at,
                 event_count: recording.events.len(),
-                duration_ms: recording.events.iter().map(|event| event.delay_ms).sum(),
+                duration_ms: recording_duration_ms(&recording.events),
             })
             .collect();
 
@@ -1082,6 +1084,10 @@ fn key_label(key: Key) -> String {
 
 fn default_playback_speed() -> f64 {
     1.0
+}
+
+fn recording_duration_ms(events: &[TimedEvent]) -> u64 {
+    events.iter().map(|event| event.delay_ms).sum()
 }
 
 fn normalize_playback_speed(speed: f64) -> Result<f64, String> {
