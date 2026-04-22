@@ -497,7 +497,7 @@ function formatTime(timestamp: number) {
             </div>
           </div>
           <span>
-            {{ formatTime(recording.createdAt) }} ·
+            {{ formatTime(recording.updatedAt) }} ·
             {{ recording.eventCount }} 个事件 ·
             {{ formatDuration(recording.durationMs) }}
           </span>

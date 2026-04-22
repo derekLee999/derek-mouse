@@ -28,6 +28,8 @@ struct Recording {
     id: u64,
     name: String,
     created_at: u64,
+    #[serde(default)]
+    updated_at: u64,
     #[serde(default = "default_playback_speed")]
     playback_speed: f64,
     #[serde(default)]
@@ -43,6 +45,7 @@ pub struct RecordingSummary {
     playback_speed: f64,
     loop_playback: bool,
     created_at: u64,
+    updated_at: u64,
     event_count: usize,
     duration_ms: u64,
 }
@@ -180,6 +183,7 @@ impl RecorderRuntime {
                 id: session.id,
                 name: session.name,
                 created_at: session.created_at,
+                updated_at: session.created_at,
                 playback_speed: 1.0,
                 loop_playback: false,
                 events: session.events,
@@ -211,6 +215,7 @@ impl RecorderRuntime {
             return Err("Recording not found".to_string());
         };
         recording.name = name.to_string();
+        recording.updated_at = unix_ms();
         drop(recordings);
 
         self.persist();
@@ -519,6 +524,7 @@ impl RecorderRuntime {
                 playback_speed: recording.playback_speed,
                 loop_playback: recording.loop_playback,
                 created_at: recording.created_at,
+                updated_at: recording.updated_at,
                 event_count: recording.events.len(),
                 duration_ms: recording.events.iter().map(|event| event.delay_ms).sum(),
             })
@@ -592,10 +598,16 @@ fn load_recordings() -> (Vec<Recording>, u64) {
         Err(_) => return (Vec::new(), 1),
     };
 
-    let recordings: Vec<Recording> = match serde_json::from_str(&data) {
+    let mut recordings: Vec<Recording> = match serde_json::from_str(&data) {
         Ok(recordings) => recordings,
         Err(_) => return (Vec::new(), 1),
     };
+
+    for recording in &mut recordings {
+        if recording.updated_at == 0 {
+            recording.updated_at = recording.created_at;
+        }
+    }
 
     let next_id = recordings.iter().map(|r| r.id).max().unwrap_or(0) + 1;
     (recordings, next_id)

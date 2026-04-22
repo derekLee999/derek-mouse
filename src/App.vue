@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { Mouse, VideoCamera } from "@element-plus/icons-vue";
 import TitleBar from "./components/TitleBar.vue";
@@ -8,7 +8,7 @@ import ClickerPanel from "./features/clicker/ClickerPanel.vue";
 import RecorderPanel from "./features/recorder/RecorderPanel.vue";
 import type { HotkeyConfig } from "./types";
 
-const activeTab = ref("clicker");
+const activeTab = ref<"clicker" | "recorder">("clicker");
 const recorderBusy = ref(false);
 const globalHotkey = ref<HotkeyConfig>({
   ctrl: false,
@@ -23,6 +23,23 @@ watch(
   },
   { immediate: true },
 );
+
+onMounted(() => {
+  window.addEventListener("keydown", handleWindowKeydown);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleWindowKeydown);
+});
+
+function handleWindowKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.key !== "Tab" || event.ctrlKey || event.altKey || event.metaKey) {
+    return;
+  }
+
+  event.preventDefault();
+  activeTab.value = activeTab.value === "clicker" ? "recorder" : "clicker";
+}
 </script>
 
 <template>

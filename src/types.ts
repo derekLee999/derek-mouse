@@ -31,6 +31,7 @@ export type RecordingSummary = {
   playbackSpeed: number;
   loopPlayback: boolean;
   createdAt: number;
+  updatedAt: number;
   eventCount: number;
   durationMs: number;
 };
