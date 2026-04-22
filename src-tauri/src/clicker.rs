@@ -7,12 +7,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rdev::{simulate, Button, Event, EventType};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 
 use crate::{
-    input::{button_from_name, validate_hotkey, HotkeyConfig, KeyboardTracker},
+    input::{
+        button_from_name, simulate, validate_hotkey, Button, Event, EventType, HotkeyConfig, Key,
+        KeyboardTracker,
+    },
     tray::{self, TrayStatus},
 };
 
@@ -80,7 +82,10 @@ impl ClickerRuntime {
     }
 
     pub fn config_snapshot(&self) -> Result<ClickerConfig, String> {
-        self.config.lock().map(|c| c.clone()).map_err(|e| e.to_string())
+        self.config
+            .lock()
+            .map(|c| c.clone())
+            .map_err(|e| e.to_string())
     }
 
     pub fn state(&self) -> Result<ClickerState, String> {
@@ -224,7 +229,7 @@ impl ClickerRuntime {
     fn handle_key_press(
         &self,
         app: &tauri::AppHandle,
-        key: rdev::Key,
+        key: Key,
         active: bool,
         show_window_on_stop: bool,
     ) {
@@ -263,7 +268,7 @@ impl ClickerRuntime {
         let _ = app.emit("clicker-status", next_running);
     }
 
-    fn handle_key_release(&self, key: rdev::Key) {
+    fn handle_key_release(&self, key: Key) {
         let hotkey = self.hotkey_config();
         if let Ok(mut keyboard) = self.keyboard.lock() {
             keyboard.handle_release(key, &hotkey);

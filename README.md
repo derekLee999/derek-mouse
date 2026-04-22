@@ -46,7 +46,7 @@
 | 前端 | Vue 3 + TypeScript + Vite |
 | UI 组件库 | Element Plus |
 | 后端 | Rust |
-| 全局输入 | rdev（键鼠事件监听与模拟） |
+| 全局输入 | windows crate（Win32 hook + SendInput） |
 | 数据存储 | JSON 文件（`~/.derek-mouse/`） |
 
 ## 开发环境

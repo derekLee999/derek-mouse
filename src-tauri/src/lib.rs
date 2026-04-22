@@ -14,8 +14,7 @@ use std::{
 
 use clicker::{ClickerConfig, ClickerRuntime};
 use config::{load_config, save_config, AppConfig};
-use input::{ActiveFeature, HotkeyConfig};
-use rdev::{listen, Event};
+use input::{listen, ActiveFeature, Event, HotkeyConfig};
 use recorder::{RecorderRuntime, RenameRecordingRequest};
 use tauri::{Emitter, Manager};
 
@@ -30,12 +29,11 @@ struct AppState {
 
 impl AppState {
     fn persist_config(&self) {
-        let clicker_config = self
-            .clicker
-            .config_snapshot()
-            .unwrap_or_default();
+        let clicker_config = self.clicker.config_snapshot().unwrap_or_default();
         let record_hotkey = self.recorder.record_hotkey_config();
-        let show_window_on_stop = self.show_window_on_global_hotkey_stop.load(Ordering::SeqCst);
+        let show_window_on_stop = self
+            .show_window_on_global_hotkey_stop
+            .load(Ordering::SeqCst);
         let playback_speed = self.playback_speed.lock().map(|s| *s).unwrap_or(1.0);
 
         let config = AppConfig {
@@ -198,21 +196,18 @@ fn play_recording(
 ) -> Result<recorder::RecorderState, String> {
     let speed = *state.playback_speed.lock().map_err(|e| e.to_string())?;
     let loop_mode = state.loop_playback.load(Ordering::SeqCst);
-    state.recorder.play_recording(id, app, false, speed, loop_mode)
+    state
+        .recorder
+        .play_recording(id, app, false, speed, loop_mode)
 }
 
 #[tauri::command]
-fn get_playback_speed(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<f64, String> {
+fn get_playback_speed(state: tauri::State<'_, Arc<AppState>>) -> Result<f64, String> {
     Ok(*state.playback_speed.lock().map_err(|e| e.to_string())?)
 }
 
 #[tauri::command]
-fn set_playback_speed(
-    speed: f64,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<f64, String> {
+fn set_playback_speed(speed: f64, state: tauri::State<'_, Arc<AppState>>) -> Result<f64, String> {
     let speed = speed.clamp(0.5, 10.0);
     *state.playback_speed.lock().map_err(|e| e.to_string())? = speed;
     state.persist_config();
@@ -227,17 +222,12 @@ fn stop_playback(
 }
 
 #[tauri::command]
-fn get_loop_playback(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<bool, String> {
+fn get_loop_playback(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     Ok(state.loop_playback.load(Ordering::SeqCst))
 }
 
 #[tauri::command]
-fn set_loop_playback(
-    value: bool,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<bool, String> {
+fn set_loop_playback(value: bool, state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     state.loop_playback.store(value, Ordering::SeqCst);
     state.persist_config();
     Ok(value)
@@ -261,7 +251,7 @@ fn spawn_global_listener(state: Arc<AppState>, app: tauri::AppHandle) {
         });
 
         if let Err(err) = result {
-            let _ = app.emit("input-listener-error", format!("{err:?}"));
+            let _ = app.emit("input-listener-error", err.to_string());
         }
     });
 }
@@ -277,11 +267,7 @@ fn handle_global_event(state: &Arc<AppState>, app: &tauri::AppHandle, event: Eve
         .show_window_on_global_hotkey_stop
         .load(Ordering::SeqCst);
 
-    let playback_speed = state
-        .playback_speed
-        .lock()
-        .map(|s| *s)
-        .unwrap_or(1.0);
+    let playback_speed = state.playback_speed.lock().map(|s| *s).unwrap_or(1.0);
 
     state.clicker.handle_event(
         &event,

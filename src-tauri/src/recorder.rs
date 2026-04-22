@@ -9,12 +9,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use rdev::{simulate, Event, EventType};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 
 use crate::{
-    input::{key_from_name, HotkeyConfig, KeyboardTracker},
+    input::{key_from_name, simulate, Event, EventType, HotkeyConfig, Key, KeyboardTracker},
     tray::{self, TrayStatus},
 };
 
@@ -366,9 +365,12 @@ impl RecorderRuntime {
                     }
                     let was_playing = self.playing.load(Ordering::SeqCst);
                     hide_main_window(app);
-                    if let Ok(state) =
-                        self.toggle_selected_playback(app.clone(), show_window_on_playback_stop, playback_speed, loop_mode)
-                    {
+                    if let Ok(state) = self.toggle_selected_playback(
+                        app.clone(),
+                        show_window_on_playback_stop,
+                        playback_speed,
+                        loop_mode,
+                    ) {
                         tray::notify_global_hotkey_state(app, !was_playing);
                         if was_playing && show_window_on_playback_stop {
                             show_main_window(app);
@@ -550,8 +552,7 @@ fn is_hotkey_related_event(event: &Event, hotkey: &HotkeyConfig) -> bool {
 
     matches!(
         (key, hotkey.ctrl, hotkey.alt),
-        (rdev::Key::ControlLeft | rdev::Key::ControlRight, true, _)
-            | (rdev::Key::Alt | rdev::Key::AltGr, _, true)
+        (Key::ControlLeft | Key::ControlRight, true, _) | (Key::Alt | Key::AltGr, _, true)
     )
 }
 
