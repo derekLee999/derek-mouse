@@ -179,8 +179,8 @@ async function commitRename() {
     renameInput.value?.[0]?.focus();
     return;
   }
-  if (trimmed.length > 15) {
-    ElMessage.warning("方案名称不能超过15个字。");
+  if (trimmed.length > 20) {
+    ElMessage.warning("方案名称不能超过20个字。");
     await nextTick();
     renameInput.value?.[0]?.focus();
     return;
@@ -508,7 +508,7 @@ function formatTime(timestamp: number) {
             ref="renameInput"
             v-model="editingName"
             size="small"
-            :maxlength="15"
+            :maxlength="20"
             :disabled="busy"
             @click.stop
             @keydown.enter.stop.prevent="commitRename"

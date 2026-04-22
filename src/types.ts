@@ -15,6 +15,7 @@ export type GlobalHotkeyOptions = {
 export type ClickerConfig = {
   clickButton: MouseButton;
   intervalSecs: number;
+  clickLimit: number;
   mode: ClickMode;
   holdButton: MouseButton;
   hotkey: HotkeyConfig;

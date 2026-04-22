@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -23,6 +23,8 @@ use crate::{
 pub struct ClickerConfig {
     pub click_button: String,
     pub interval_secs: f64,
+    #[serde(default)]
+    pub click_limit: u64,
     pub mode: String,
     pub hold_button: String,
     pub hotkey: HotkeyConfig,
@@ -41,6 +43,7 @@ pub struct ClickerRuntime {
     mouse_held: AtomicBool,
     keyboard: Mutex<KeyboardTracker>,
     injecting_mouse_event: AtomicBool,
+    clicked_count: AtomicU64,
     last_mouse_position: Mutex<Option<(f64, f64)>>,
 }
 
@@ -49,6 +52,7 @@ impl Default for ClickerConfig {
         Self {
             click_button: "left".to_string(),
             interval_secs: 0.2,
+            click_limit: 0,
             mode: "toggle".to_string(),
             hold_button: "left".to_string(),
             hotkey: HotkeyConfig::default(),
@@ -64,6 +68,7 @@ impl Default for ClickerRuntime {
             mouse_held: AtomicBool::new(false),
             keyboard: Mutex::new(KeyboardTracker::default()),
             injecting_mouse_event: AtomicBool::new(false),
+            clicked_count: AtomicU64::new(0),
             last_mouse_position: Mutex::new(None),
         }
     }
@@ -77,6 +82,7 @@ impl ClickerRuntime {
             mouse_held: AtomicBool::new(false),
             keyboard: Mutex::new(KeyboardTracker::default()),
             injecting_mouse_event: AtomicBool::new(false),
+            clicked_count: AtomicU64::new(0),
             last_mouse_position: Mutex::new(None),
         }
     }
@@ -112,6 +118,7 @@ impl ClickerRuntime {
     }
 
     pub fn start(&self) -> ClickerState {
+        self.clicked_count.store(0, Ordering::SeqCst);
         self.running.store(true, Ordering::SeqCst);
         tray::set_status(TrayStatus::Running);
         ClickerState {
@@ -123,6 +130,7 @@ impl ClickerRuntime {
     pub fn stop(&self) -> ClickerState {
         self.running.store(false, Ordering::SeqCst);
         self.mouse_held.store(false, Ordering::SeqCst);
+        self.clicked_count.store(0, Ordering::SeqCst);
         tray::set_status(TrayStatus::Stopped);
         ClickerState {
             config: self.config.lock().expect("clicker config poisoned").clone(),
@@ -180,10 +188,38 @@ impl ClickerRuntime {
 
                 if let Some(button) = button_from_name(&config.click_button) {
                     runtime.injecting_mouse_event.store(true, Ordering::SeqCst);
+
+                    // In hold mode with right-button trigger and left-button auto-click,
+                    // browsers may keep right-click context behavior active and swallow
+                    // synthesized left clicks. Releasing right button first improves
+                    // compatibility on web pages while keeping internal hold state.
+                    if config.mode == "hold"
+                        && config.hold_button == "right"
+                        && config.click_button == "left"
+                    {
+                        let _ = simulate(&EventType::ButtonRelease(Button::Right));
+                        thread::sleep(Duration::from_millis(1));
+                    }
+
                     let _ = simulate(&EventType::ButtonPress(button));
                     thread::sleep(Duration::from_millis(2));
                     let _ = simulate(&EventType::ButtonRelease(button));
                     runtime.injecting_mouse_event.store(false, Ordering::SeqCst);
+
+                    let total_clicks = runtime.clicked_count.fetch_add(1, Ordering::SeqCst) + 1;
+                    if config.mode == "toggle"
+                        && config.click_limit > 0
+                        && total_clicks >= config.click_limit
+                    {
+                        runtime.running.store(false, Ordering::SeqCst);
+                        runtime.mouse_held.store(false, Ordering::SeqCst);
+                        runtime.clicked_count.store(0, Ordering::SeqCst);
+                        tray::set_status(TrayStatus::Stopped);
+                        let _ = app.emit("clicker-status", false);
+                        was_clicking = false;
+                        next_click_at = Instant::now();
+                        continue;
+                    }
                 }
 
                 let _ = app.emit("clicker-status", runtime.running.load(Ordering::SeqCst));
@@ -261,8 +297,12 @@ impl ClickerRuntime {
         }
         let next_running = !self.running.load(Ordering::SeqCst);
         self.running.store(next_running, Ordering::SeqCst);
+        if next_running {
+            self.clicked_count.store(0, Ordering::SeqCst);
+        }
         if !next_running {
             self.mouse_held.store(false, Ordering::SeqCst);
+            self.clicked_count.store(0, Ordering::SeqCst);
         }
         tray::set_status(if next_running {
             TrayStatus::Running
@@ -393,6 +433,10 @@ fn normalize_config(mut config: ClickerConfig) -> Result<ClickerConfig, String> 
         0.2
     };
 
+    if config.click_limit > 10_000_000 {
+        config.click_limit = 10_000_000;
+    }
+
     if config.interval_secs <= 0.0 {
         config.interval_secs = 0.01;
     }
@@ -404,6 +448,11 @@ fn normalize_config(mut config: ClickerConfig) -> Result<ClickerConfig, String> 
 
     config.click_button = config.click_button.to_lowercase();
     config.hold_button = config.hold_button.to_lowercase();
+
+    if config.mode == "hold" && config.hold_button == "middle" {
+        config.hold_button = "left".to_string();
+    }
+
     validate_hotkey(&mut config.hotkey)?;
 
     Ok(config)

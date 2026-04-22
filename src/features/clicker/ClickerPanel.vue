@@ -19,6 +19,11 @@ const modeOptions = [
   { label: "按住鼠标连点", value: "hold" },
 ] as const;
 
+const holdButtonOptions = [
+  { label: "左键", value: "left" },
+  { label: "右键", value: "right" },
+] as const;
+
 const running = ref(false);
 const errorMessage = ref("");
 const initialized = ref(false);
@@ -26,6 +31,7 @@ const initialized = ref(false);
 const config = reactive<ClickerConfig>({
   clickButton: "left",
   intervalSecs: 0.2,
+  clickLimit: 0,
   mode: "toggle",
   holdButton: "left",
   hotkey: {
@@ -71,6 +77,7 @@ async function saveConfig() {
 
   try {
     ensureValidInterval();
+    ensureValidClickLimit();
     const state = await invoke<ClickerState>("update_clicker_config", {
       config: buildConfigPayload(),
     });
@@ -85,6 +92,7 @@ function buildConfigPayload(): ClickerConfig {
   return {
     clickButton: config.clickButton,
     intervalSecs: config.intervalSecs,
+    clickLimit: config.clickLimit,
     mode: config.mode,
     holdButton: config.holdButton,
     hotkey: {
@@ -112,8 +120,21 @@ function handleIntervalChange(value: number | undefined) {
   config.intervalSecs = typeof value === "number" ? Number(value.toFixed(2)) : 0.2;
 }
 
+function ensureValidClickLimit() {
+  if (!Number.isFinite(config.clickLimit) || config.clickLimit < 0) {
+    config.clickLimit = 0;
+    return;
+  }
+
+  config.clickLimit = Math.floor(config.clickLimit);
+}
+
+function handleClickLimitChange(value: number | undefined) {
+  config.clickLimit = typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
 function handleModeChange() {
-  if (config.mode === "hold") {
+  if (config.mode === "hold" && config.holdButton === "middle") {
     config.holdButton = "left";
   }
 }
@@ -156,10 +177,25 @@ function handleModeChange() {
         </div>
       </el-form-item>
 
+      <el-form-item v-if="config.mode === 'toggle'" label="限制次数">
+        <div class="interval-row">
+          <el-input-number
+            v-model="config.clickLimit"
+            :min="0"
+            :step="1"
+            :precision="0"
+            controls-position="right"
+            :disabled="running"
+            @change="handleClickLimitChange"
+          />
+          <span>次（0 为不限制）</span>
+        </div>
+      </el-form-item>
+
       <el-form-item v-if="config.mode === 'hold'" label="按住触发键">
         <el-segmented
           v-model="config.holdButton"
-          :options="mouseButtonOptions"
+          :options="holdButtonOptions"
           block
           :disabled="running"
         />
