@@ -36,6 +36,24 @@ export type RecordingSummary = {
   durationMs: number;
 };
 
+export type RecordingEventSummary = {
+  index: number;
+  delayMs: number;
+  action: string;
+  target: string;
+  critical: boolean;
+};
+
+export type RecordingDetail = {
+  id: number;
+  name: string;
+  playbackSpeed: number;
+  loopPlayback: boolean;
+  createdAt: number;
+  updatedAt: number;
+  events: RecordingEventSummary[];
+};
+
 export type RecorderState = {
   recordings: RecordingSummary[];
   selectedId: number | null;

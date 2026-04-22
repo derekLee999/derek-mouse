@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { TauriEvent, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { RefreshRight, VideoPlay } from "@element-plus/icons-vue";
 import {
@@ -213,7 +215,7 @@ function openRecordingMenu(event: MouseEvent, recording: RecordingSummary) {
   closeSpeedMenu();
 
   const menuWidth = 132;
-  const menuHeight = 82;
+  const menuHeight = 112;
   recordingMenu.value = {
     visible: true,
     x: Math.min(event.clientX, window.innerWidth - menuWidth - 8),
@@ -255,6 +257,55 @@ async function handleMenuDelete() {
   if (recording) {
     await removeRecording(recording);
   }
+}
+
+async function handleMenuEdit() {
+  const recording = recordingMenu.value.recording;
+  closeRecordingMenu();
+  if (!recording || busy.value) return;
+
+  const label = `recording-editor-${recording.id}`;
+  const existing = await WebviewWindow.getByLabel(label);
+  if (existing) {
+    await existing.setFocus();
+    return;
+  }
+
+  const mainWindow = getCurrentWindow();
+  await mainWindow.setEnabled(false);
+
+  const restoreMainWindow = async () => {
+    await mainWindow.setEnabled(true);
+    await mainWindow.setFocus();
+    await refreshState();
+  };
+
+  const editor = new WebviewWindow(label, {
+    url: `/index.html?view=recording-editor&id=${recording.id}`,
+    title: "编辑",
+    width: 880,
+    height: 640,
+    minWidth: 760,
+    minHeight: 520,
+    center: true,
+    resizable: true,
+    decorations: false,
+    minimizable: false,
+    maximizable: false,
+    parent: mainWindow,
+    focus: true,
+  });
+
+  editor.once("tauri://created", async () => {
+    await editor.setFocus();
+  });
+  editor.once(TauriEvent.WINDOW_DESTROYED, () => {
+    void restoreMainWindow();
+  });
+  editor.once("tauri://error", async (event) => {
+    await restoreMainWindow();
+    ElMessage.error(String(event.payload));
+  });
 }
 
 function formatSpeed(speed: number) {
@@ -515,6 +566,9 @@ function formatTime(timestamp: number) {
     >
       <button type="button" class="context-menu-item" @click="handleMenuRename">
         编辑名称
+      </button>
+      <button type="button" class="context-menu-item" @click="handleMenuEdit">
+        编辑方案
       </button>
       <button type="button" class="context-menu-item danger" @click="handleMenuDelete">
         删除

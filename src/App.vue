@@ -5,9 +5,11 @@ import { Mouse, VideoCamera } from "@element-plus/icons-vue";
 import TitleBar from "./components/TitleBar.vue";
 import GlobalHotkeyBar from "./components/GlobalHotkeyBar.vue";
 import ClickerPanel from "./features/clicker/ClickerPanel.vue";
+import RecordingEditorWindow from "./features/recorder/RecordingEditorWindow.vue";
 import RecorderPanel from "./features/recorder/RecorderPanel.vue";
 import type { HotkeyConfig } from "./types";
 
+const isRecordingEditor = new URLSearchParams(window.location.search).get("view") === "recording-editor";
 const activeTab = ref<"clicker" | "recorder">("clicker");
 const recorderBusy = ref(false);
 const globalHotkey = ref<HotkeyConfig>({
@@ -19,16 +21,19 @@ const globalHotkey = ref<HotkeyConfig>({
 watch(
   activeTab,
   (feature) => {
+    if (isRecordingEditor) return;
     void invoke("set_active_feature", { feature });
   },
   { immediate: true },
 );
 
 onMounted(() => {
+  if (isRecordingEditor) return;
   window.addEventListener("keydown", handleWindowKeydown);
 });
 
 onBeforeUnmount(() => {
+  if (isRecordingEditor) return;
   window.removeEventListener("keydown", handleWindowKeydown);
 });
 
@@ -43,7 +48,8 @@ function handleWindowKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <main class="app-shell">
+  <RecordingEditorWindow v-if="isRecordingEditor" />
+  <main v-else class="app-shell">
     <TitleBar />
     <GlobalHotkeyBar v-model="globalHotkey" :disabled="activeTab === 'recorder' && recorderBusy" />
 

@@ -16,8 +16,8 @@ use clicker::{ClickerConfig, ClickerRuntime};
 use config::{load_config, save_config, AppConfig};
 use input::{listen, ActiveFeature, Event, HotkeyConfig};
 use recorder::{
-    RecorderRuntime, RenameRecordingRequest, UpdateRecordingLoopPlaybackRequest,
-    UpdateRecordingPlaybackSpeedRequest,
+    RecorderRuntime, RenameRecordingRequest, SaveEditedRecordingRequest,
+    UpdateRecordingLoopPlaybackRequest, UpdateRecordingPlaybackSpeedRequest,
 };
 use tauri::{Emitter, Manager};
 
@@ -165,6 +165,14 @@ fn get_recorder_state(
 }
 
 #[tauri::command]
+fn get_recording_detail(
+    id: u64,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<recorder::RecordingDetail, String> {
+    state.recorder.recording_detail(id)
+}
+
+#[tauri::command]
 fn start_recording(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<recorder::RecorderState, String> {
@@ -224,6 +232,14 @@ fn update_recording_loop_playback(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<recorder::RecorderState, String> {
     state.recorder.update_recording_loop_playback(request)
+}
+
+#[tauri::command]
+fn save_edited_recording(
+    request: SaveEditedRecordingRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<recorder::RecorderState, String> {
+    state.recorder.save_edited_recording(request)
 }
 
 #[tauri::command]
@@ -324,6 +340,7 @@ pub fn run() {
             start_clicker,
             stop_clicker,
             get_recorder_state,
+            get_recording_detail,
             start_recording,
             stop_recording,
             rename_recording,
@@ -332,7 +349,8 @@ pub fn run() {
             stop_playback,
             delete_recording,
             update_recording_playback_speed,
-            update_recording_loop_playback
+            update_recording_loop_playback,
+            save_edited_recording
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

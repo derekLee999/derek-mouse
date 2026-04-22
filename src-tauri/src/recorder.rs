@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::PathBuf,
     sync::{
@@ -52,6 +53,28 @@ pub struct RecordingSummary {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RecordingDetail {
+    id: u64,
+    name: String,
+    playback_speed: f64,
+    loop_playback: bool,
+    created_at: u64,
+    updated_at: u64,
+    events: Vec<RecordingEventSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingEventSummary {
+    index: usize,
+    delay_ms: u64,
+    action: String,
+    target: String,
+    critical: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecorderState {
     recordings: Vec<RecordingSummary>,
     selected_id: Option<u64>,
@@ -78,6 +101,21 @@ pub struct UpdateRecordingPlaybackSpeedRequest {
 pub struct UpdateRecordingLoopPlaybackRequest {
     id: u64,
     value: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveEditedRecordingRequest {
+    id: u64,
+    removed_event_indices: Vec<usize>,
+    mode: SaveEditedRecordingMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SaveEditedRecordingMode {
+    Append,
+    Replace,
 }
 
 struct RecorderSession {
@@ -124,6 +162,32 @@ impl RecorderRuntime {
     }
     pub fn state(&self) -> Result<RecorderState, String> {
         self.make_state()
+    }
+
+    pub fn recording_detail(&self, id: u64) -> Result<RecordingDetail, String> {
+        let recording = self
+            .recordings
+            .lock()
+            .map_err(|err| err.to_string())?
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+            .ok_or_else(|| "Recording not found".to_string())?;
+
+        Ok(RecordingDetail {
+            id: recording.id,
+            name: recording.name,
+            playback_speed: recording.playback_speed,
+            loop_playback: recording.loop_playback,
+            created_at: recording.created_at,
+            updated_at: recording.updated_at,
+            events: recording
+                .events
+                .iter()
+                .enumerate()
+                .map(|(index, event)| summarize_event(index, event))
+                .collect(),
+        })
     }
 
     pub fn record_hotkey_config(&self) -> HotkeyConfig {
@@ -289,6 +353,66 @@ impl RecorderRuntime {
         recording.loop_playback = request.value;
         drop(recordings);
 
+        self.persist();
+        self.make_state()
+    }
+
+    pub fn save_edited_recording(
+        &self,
+        request: SaveEditedRecordingRequest,
+    ) -> Result<RecorderState, String> {
+        if self.recording.load(Ordering::SeqCst) {
+            return Err("Recording is running".to_string());
+        }
+        if self.playing.load(Ordering::SeqCst) {
+            return Err("Playback is running".to_string());
+        }
+
+        let mut recordings = self.recordings.lock().map_err(|err| err.to_string())?;
+        let Some(original_index) = recordings.iter().position(|item| item.id == request.id) else {
+            return Err("Recording not found".to_string());
+        };
+        let original = recordings[original_index].clone();
+
+        if request
+            .removed_event_indices
+            .iter()
+            .any(|index| *index >= original.events.len())
+        {
+            return Err("Edited event selection is invalid".to_string());
+        }
+
+        let removed_indices: HashSet<usize> = request.removed_event_indices.into_iter().collect();
+        let events = original
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !removed_indices.contains(index))
+            .map(|(_, event)| event.clone())
+            .collect();
+
+        let now_ms = unix_ms();
+        let new_id = self.take_next_id()?;
+        let new_recording = Recording {
+            id: new_id,
+            name: match request.mode {
+                SaveEditedRecordingMode::Append => format!("{} 编辑", original.name),
+                SaveEditedRecordingMode::Replace => original.name,
+            },
+            created_at: now_ms,
+            updated_at: now_ms,
+            playback_speed: original.playback_speed,
+            loop_playback: original.loop_playback,
+            events,
+        };
+
+        if matches!(request.mode, SaveEditedRecordingMode::Replace) {
+            recordings.remove(original_index);
+        }
+        recordings.insert(0, new_recording);
+        drop(recordings);
+
+        *self.selected_id.lock().map_err(|err| err.to_string())? = Some(new_id);
         self.persist();
         self.make_state()
     }
@@ -561,6 +685,137 @@ fn unix_ms() -> u64 {
 
 fn default_recording_name(created_at: u64) -> String {
     format!("录制方案 {}", created_at)
+}
+
+fn summarize_event(index: usize, event: &TimedEvent) -> RecordingEventSummary {
+    let (action, target, critical) = match event.event_type {
+        EventType::KeyPress(key) => ("键盘按下".to_string(), key_label(key), true),
+        EventType::KeyRelease(key) => ("键盘释放".to_string(), key_label(key), true),
+        EventType::ButtonPress(button) => ("鼠标按下".to_string(), button_label(button), true),
+        EventType::ButtonRelease(button) => ("鼠标释放".to_string(), button_label(button), true),
+        EventType::MouseMove { x, y } => (
+            "鼠标移动".to_string(),
+            format!("x {:.0}, y {:.0}", x, y),
+            false,
+        ),
+        EventType::Wheel { delta_x, delta_y } => (
+            "滚轮".to_string(),
+            format!("水平 {delta_x}, 垂直 {delta_y}"),
+            false,
+        ),
+    };
+
+    RecordingEventSummary {
+        index,
+        delay_ms: event.delay_ms,
+        action,
+        target,
+        critical,
+    }
+}
+
+fn button_label(button: crate::input::Button) -> String {
+    match button {
+        crate::input::Button::Left => "左键".to_string(),
+        crate::input::Button::Right => "右键".to_string(),
+        crate::input::Button::Middle => "中键".to_string(),
+        crate::input::Button::Unknown(code) => format!("扩展键 {code}"),
+    }
+}
+
+fn key_label(key: Key) -> String {
+    match key {
+        Key::Alt | Key::AltGr => "Alt".to_string(),
+        Key::Backspace => "Backspace".to_string(),
+        Key::CapsLock => "CapsLock".to_string(),
+        Key::ControlLeft | Key::ControlRight => "Ctrl".to_string(),
+        Key::Delete => "Delete".to_string(),
+        Key::DownArrow => "Down".to_string(),
+        Key::End => "End".to_string(),
+        Key::Escape => "Esc".to_string(),
+        Key::Home => "Home".to_string(),
+        Key::LeftArrow => "Left".to_string(),
+        Key::MetaLeft | Key::MetaRight => "Meta".to_string(),
+        Key::PageDown => "PageDown".to_string(),
+        Key::PageUp => "PageUp".to_string(),
+        Key::Return | Key::KpReturn => "Enter".to_string(),
+        Key::RightArrow => "Right".to_string(),
+        Key::ShiftLeft | Key::ShiftRight => "Shift".to_string(),
+        Key::Space => "Space".to_string(),
+        Key::Tab => "Tab".to_string(),
+        Key::UpArrow => "Up".to_string(),
+        Key::PrintScreen => "PrintScreen".to_string(),
+        Key::ScrollLock => "ScrollLock".to_string(),
+        Key::Pause => "Pause".to_string(),
+        Key::NumLock => "NumLock".to_string(),
+        Key::BackQuote => "`".to_string(),
+        Key::Num1 => "1".to_string(),
+        Key::Num2 => "2".to_string(),
+        Key::Num3 => "3".to_string(),
+        Key::Num4 => "4".to_string(),
+        Key::Num5 => "5".to_string(),
+        Key::Num6 => "6".to_string(),
+        Key::Num7 => "7".to_string(),
+        Key::Num8 => "8".to_string(),
+        Key::Num9 => "9".to_string(),
+        Key::Num0 => "0".to_string(),
+        Key::Minus => "-".to_string(),
+        Key::Equal => "=".to_string(),
+        Key::KeyQ => "Q".to_string(),
+        Key::KeyW => "W".to_string(),
+        Key::KeyE => "E".to_string(),
+        Key::KeyR => "R".to_string(),
+        Key::KeyT => "T".to_string(),
+        Key::KeyY => "Y".to_string(),
+        Key::KeyU => "U".to_string(),
+        Key::KeyI => "I".to_string(),
+        Key::KeyO => "O".to_string(),
+        Key::KeyP => "P".to_string(),
+        Key::LeftBracket => "[".to_string(),
+        Key::RightBracket => "]".to_string(),
+        Key::KeyA => "A".to_string(),
+        Key::KeyS => "S".to_string(),
+        Key::KeyD => "D".to_string(),
+        Key::KeyF => "F".to_string(),
+        Key::KeyG => "G".to_string(),
+        Key::KeyH => "H".to_string(),
+        Key::KeyJ => "J".to_string(),
+        Key::KeyK => "K".to_string(),
+        Key::KeyL => "L".to_string(),
+        Key::SemiColon => ";".to_string(),
+        Key::Quote => "'".to_string(),
+        Key::BackSlash => "\\".to_string(),
+        Key::IntlBackslash => "\\".to_string(),
+        Key::KeyZ => "Z".to_string(),
+        Key::KeyX => "X".to_string(),
+        Key::KeyC => "C".to_string(),
+        Key::KeyV => "V".to_string(),
+        Key::KeyB => "B".to_string(),
+        Key::KeyN => "N".to_string(),
+        Key::KeyM => "M".to_string(),
+        Key::Comma => ",".to_string(),
+        Key::Dot => ".".to_string(),
+        Key::Slash => "/".to_string(),
+        Key::Insert => "Insert".to_string(),
+        Key::KpMinus => "Num -".to_string(),
+        Key::KpPlus => "Num +".to_string(),
+        Key::KpMultiply => "Num *".to_string(),
+        Key::KpDivide => "Num /".to_string(),
+        Key::Kp0 => "Num 0".to_string(),
+        Key::Kp1 => "Num 1".to_string(),
+        Key::Kp2 => "Num 2".to_string(),
+        Key::Kp3 => "Num 3".to_string(),
+        Key::Kp4 => "Num 4".to_string(),
+        Key::Kp5 => "Num 5".to_string(),
+        Key::Kp6 => "Num 6".to_string(),
+        Key::Kp7 => "Num 7".to_string(),
+        Key::Kp8 => "Num 8".to_string(),
+        Key::Kp9 => "Num 9".to_string(),
+        Key::KpDelete => "Num Del".to_string(),
+        Key::Function => "Fn".to_string(),
+        Key::Unknown(code) => format!("未知键 {code}"),
+        key => format!("{key:?}"),
+    }
 }
 
 fn default_playback_speed() -> f64 {
