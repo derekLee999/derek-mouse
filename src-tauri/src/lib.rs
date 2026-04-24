@@ -17,17 +17,20 @@ use clicker::{ClickerConfig, ClickerRuntime};
 use config::{load_config, save_config, AppConfig};
 use input::{listen, ActiveFeature, Event, HotkeyConfig};
 use mouse_macro::{
-    CaptureImageResult, CreateMacroRequest, FindImageRegion, FindImageRequest, FindImageResult,
-    MacroDetail, MouseMacroRuntime, UpdateMacroLoopPlaybackRequest,
-    UpdateMacroPlaybackSpeedRequest, UpdateMacroRequest,
+    CaptureImageResult, CreateMacroRequest, FindColorRequest, FindColorResult, FindImageRegion,
+    FindImageRequest, FindImageResult, MacroDetail, MouseMacroRuntime,
+    UpdateMacroLoopPlaybackRequest, UpdateMacroPlaybackSpeedRequest, UpdateMacroRequest,
 };
 use recorder::{
     RecorderRuntime, RenameRecordingRequest, SaveEditedRecordingRequest,
     UpdateRecordingLoopPlaybackRequest, UpdateRecordingPlaybackSpeedRequest,
 };
 use tauri::{Emitter, Manager};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+use windows::Win32::{
+    Graphics::Gdi::{GetDC, GetPixel, ReleaseDC},
+    UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    },
 };
 
 struct AppState {
@@ -133,6 +136,15 @@ struct CoordinatePickSnapshotPayload {
     height: u32,
 }
 
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PixelColor {
+    r: u8,
+    g: u8,
+    b: u8,
+    hex: String,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FinishMouseCoordinatePickRequest {
@@ -147,6 +159,12 @@ struct FinishMouseRegionPickRequest {
     y1: i32,
     x2: i32,
     y2: i32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinishMouseColorPickRequest {
+    color: String,
 }
 
 #[tauri::command]
@@ -449,6 +467,14 @@ fn test_mouse_macro_find_image(
 }
 
 #[tauri::command]
+fn test_mouse_macro_find_color(
+    request: FindColorRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<FindColorResult, String> {
+    state.mouse_macro.test_find_color(request)
+}
+
+#[tauri::command]
 fn capture_mouse_macro_region_image(
     region: FindImageRegion,
     state: tauri::State<'_, Arc<AppState>>,
@@ -578,6 +604,55 @@ fn finish_mouse_region_pick(
             x2: request.x2,
             y2: request.y2,
         },
+    )
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_pixel_color(x: i32, y: i32) -> Result<PixelColor, String> {
+    unsafe {
+        let hdc = GetDC(None);
+        if hdc.is_invalid() {
+            return Err("Could not get screen DC".to_string());
+        }
+        let color = GetPixel(hdc, x, y);
+        let _ = ReleaseDC(None, hdc);
+
+        if color.0 == 0xFFFFFFFF {
+            return Err("Could not read pixel color".to_string());
+        }
+
+        let color_val = color.0;
+        let r = (color_val & 0xFF) as u8;
+        let g = ((color_val >> 8) & 0xFF) as u8;
+        let b = ((color_val >> 16) & 0xFF) as u8;
+
+        Ok(PixelColor {
+            r,
+            g,
+            b,
+            hex: format!("#{:02X}{:02X}{:02X}", r, g, b),
+        })
+    }
+}
+
+#[tauri::command]
+fn finish_mouse_color_pick(
+    request: FinishMouseColorPickRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let session = state
+        .coordinate_pick_session
+        .lock()
+        .map_err(|err| err.to_string())?
+        .take()
+        .ok_or_else(|| "Coordinate picker is not active".to_string())?;
+
+    app.emit_to(
+        session.target_label,
+        "mouse-color-picked",
+        request,
     )
     .map_err(|err| err.to_string())
 }
@@ -721,12 +796,15 @@ pub fn run() {
             play_mouse_macro,
             stop_mouse_macro,
             test_mouse_macro_find_image,
+            test_mouse_macro_find_color,
             capture_mouse_macro_region_image,
             get_mouse_macro_screen_bounds,
             start_mouse_coordinate_pick,
             get_mouse_coordinate_pick_snapshot,
             finish_mouse_coordinate_pick,
             finish_mouse_region_pick,
+            get_pixel_color,
+            finish_mouse_color_pick,
             cancel_mouse_coordinate_pick
         ])
         .run(tauri::generate_context!())

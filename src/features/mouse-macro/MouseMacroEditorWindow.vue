@@ -12,12 +12,13 @@ import {
   type MouseButton,
   type MouseMacroFindImageAction,
   type MouseMacroFindImageEvent,
+  type MouseMacroFindColorEvent,
   type MouseMacroEvent,
   type MouseMacroDetail,
   type MouseMacroState,
 } from "../../types";
 
-type OperationObject = "mouse" | "keyboard" | "delay" | "findImage";
+type OperationObject = "mouse" | "keyboard" | "delay" | "findImage" | "findColor";
 type MouseOperation = "mouseClick" | "mouseDoubleClick" | "mouseDown" | "mouseUp" | "mouseMove";
 type KeyboardOperation = "keyClick" | "keyDown" | "keyUp";
 
@@ -38,7 +39,7 @@ type CoordinatePickSnapshotMeta = {
   height: number;
 };
 
-type CoordinatePickMode = "move" | "find-region" | "template";
+type CoordinatePickMode = "move" | "find-region" | "template" | "color";
 
 type FindImageResult = {
   found: boolean;
@@ -47,6 +48,12 @@ type FindImageResult = {
   y: number;
   width: number;
   height: number;
+};
+
+type FindColorResult = {
+  found: boolean;
+  x: number;
+  y: number;
 };
 
 type CaptureImageResult = {
@@ -99,6 +106,14 @@ const findAction = ref<MouseMacroFindImageAction>("click");
 const findWaitUntilFound = ref(false);
 const findingTest = ref(false);
 const capturingTemplate = ref(false);
+
+// 找色相关
+const findColorHex = ref("#FF0000");
+const findColorThreshold = ref(10);
+const findColorAction = ref<MouseMacroFindImageAction>("click");
+const findColorWaitUntilFound = ref(false);
+const findingColorTest = ref(false);
+const pickingColor = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const selectedEventId = ref<number | null>(null);
 const eventMenu = ref<{
@@ -118,6 +133,7 @@ const dropIndicatorIndex = ref<number | null>(null);
 let nextEventId = 1;
 let unlistenCoordinate: UnlistenFn | undefined;
 let unlistenRegion: UnlistenFn | undefined;
+let unlistenColor: UnlistenFn | undefined;
 
 type DragState = {
   index: number;
@@ -147,6 +163,7 @@ const operationObjectOptions = [
   { label: "键盘操作", value: "keyboard" },
   { label: "延迟等待", value: "delay" },
   { label: "找图", value: "findImage" },
+  { label: "找色", value: "findColor" },
 ] as const;
 
 const canSave = computed(() => macroName.value.trim().length > 0 && events.value.length > 0);
@@ -165,6 +182,16 @@ const canAddEvent = computed(() => {
       Number.isFinite(findScale.value) &&
       findScale.value >= 0.1 &&
       findScale.value <= 5
+    );
+  }
+  if (operationObject.value === "findColor") {
+    return (
+      findX1.value !== findX2.value &&
+      findY1.value !== findY2.value &&
+      isValidHexColor(findColorHex.value) &&
+      Number.isInteger(findColorThreshold.value) &&
+      findColorThreshold.value >= 0 &&
+      findColorThreshold.value <= 255
     );
   }
   if (operationObject.value === "mouse" && mouseOperation.value === "mouseMove") {
@@ -197,6 +224,10 @@ onMounted(async () => {
     void handlePickedRegion(event.payload);
     pickingCoordinate.value = false;
   });
+  unlistenColor = await listen<{ color: string }>("mouse-color-picked", (event) => {
+    handlePickedColor(event.payload.color);
+    pickingCoordinate.value = false;
+  });
   document.addEventListener("click", closeEventMenu);
   document.addEventListener("keydown", handleDocumentKeydown);
 });
@@ -204,6 +235,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unlistenCoordinate?.();
   unlistenRegion?.();
+  unlistenColor?.();
   if (pickingCoordinate.value) {
     void cancelCoordinatePick();
   }
@@ -219,6 +251,8 @@ watch(operationObject, (value) => {
   } else if (value === "keyboard") {
     keyboardOperation.value = "keyClick";
   } else if (value === "findImage" && screenBounds.value && findRegionMode.value === "full") {
+    applyFullSearchRegion();
+  } else if (value === "findColor" && screenBounds.value && findRegionMode.value === "full") {
     applyFullSearchRegion();
   }
 });
@@ -255,6 +289,23 @@ function handleDocumentKeydown(event: KeyboardEvent) {
 function normalizeInteger(value: number | undefined, fallback: number, min: number, max?: number) {
   const normalized = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback;
   return Math.min(Math.max(normalized, min), max ?? Number.MAX_SAFE_INTEGER);
+}
+
+function isValidHexColor(hex: string): boolean {
+  return /^#[0-9A-Fa-f]{6}$/.test(hex);
+}
+
+function handleColorHexChange(value: string) {
+  const hex = value.trim().toUpperCase();
+  if (!hex.startsWith("#")) {
+    findColorHex.value = "#" + hex;
+    return;
+  }
+  findColorHex.value = hex;
+}
+
+function handleColorThresholdChange(value: number | undefined) {
+  findColorThreshold.value = normalizeInteger(value, 10, 0, 255);
 }
 
 async function loadScreenBounds() {
@@ -319,8 +370,9 @@ async function startCoordinatePick(mode: CoordinatePickMode = "move") {
     });
 
     const label = `coordinate-picker-${Date.now()}`;
+    const modeParam = mode === "move" ? "coordinate" : mode === "color" ? "color" : "region";
     const picker = new WebviewWindow(label, {
-      url: `/index.html?view=coordinate-picker&mode=${mode === "move" ? "coordinate" : "region"}`,
+      url: `/index.html?view=coordinate-picker&mode=${modeParam}`,
       title: "选择坐标",
       x: snapshot.left,
       y: snapshot.top,
@@ -355,6 +407,9 @@ async function startCoordinatePick(mode: CoordinatePickMode = "move") {
     if (mode === "template") {
       capturingTemplate.value = false;
     }
+    if (mode === "color") {
+      pickingColor.value = false;
+    }
     ElMessage.error(String(error));
   }
 }
@@ -363,6 +418,7 @@ async function cancelCoordinatePick() {
   pickingCoordinate.value = false;
   coordinatePickMode.value = null;
   capturingTemplate.value = false;
+  pickingColor.value = false;
   try {
     await invoke("cancel_mouse_coordinate_pick");
   } catch {}
@@ -405,6 +461,21 @@ function startFindRegionPick() {
     return;
   }
   void startCoordinatePick("find-region");
+}
+
+function startColorPick() {
+  if (pickingCoordinate.value) {
+    void cancelCoordinatePick();
+    return;
+  }
+  pickingColor.value = true;
+  void startCoordinatePick("color");
+}
+
+function handlePickedColor(color: string) {
+  findColorHex.value = color.toUpperCase();
+  pickingColor.value = false;
+  ElMessage.success(`已获取颜色 ${color.toUpperCase()}`);
 }
 
 function addEvent() {
@@ -450,6 +521,10 @@ function buildEvent(): MouseMacroEvent {
     return buildFindImageEvent();
   }
 
+  if (operationObject.value === "findColor") {
+    return buildFindColorEvent();
+  }
+
   if (operationObject.value === "keyboard") {
     return { kind: keyboardOperation.value, key: selectedKey.value };
   }
@@ -463,6 +538,22 @@ function buildEvent(): MouseMacroEvent {
   }
 
   return { kind: mouseOperation.value, button: selectedButton.value };
+}
+
+function buildFindColorEvent(): MouseMacroFindColorEvent {
+  return {
+    kind: "findColor",
+    region: {
+      x1: normalizeInteger(findX1.value, 0, Number.MIN_SAFE_INTEGER),
+      y1: normalizeInteger(findY1.value, 0, Number.MIN_SAFE_INTEGER),
+      x2: normalizeInteger(findX2.value, 0, Number.MIN_SAFE_INTEGER),
+      y2: normalizeInteger(findY2.value, 0, Number.MIN_SAFE_INTEGER),
+    },
+    color: findColorHex.value.toUpperCase(),
+    threshold: normalizeInteger(findColorThreshold.value, 10, 0, 255),
+    action: findColorAction.value,
+    waitUntilFound: findColorWaitUntilFound.value,
+  };
 }
 
 function buildFindImageEvent(): MouseMacroFindImageEvent {
@@ -565,6 +656,29 @@ async function testFindImage() {
   }
 }
 
+async function testFindColor() {
+  if (!canAddEvent.value || operationObject.value !== "findColor") {
+    ElMessage.warning("请先补全找色配置。");
+    return;
+  }
+
+  findingColorTest.value = true;
+  try {
+    const result = await invoke<FindColorResult>("test_mouse_macro_find_color", {
+      request: buildFindColorEvent(),
+    });
+    if (result.found) {
+      ElMessage.success(`找到颜色，坐标 ${result.x}, ${result.y}`);
+    } else {
+      ElMessage.warning("未在区域内找到指定颜色。");
+    }
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    findingColorTest.value = false;
+  }
+}
+
 function updateEvent() {
   if (selectedEventId.value === null) return;
 
@@ -657,6 +771,19 @@ function restoreEventToEditor(event: DraftEvent) {
       findScale.value = event.scale;
       findAction.value = event.action;
       findWaitUntilFound.value = event.waitUntilFound;
+      appendDelay.value = false;
+      break;
+    case "findColor":
+      operationObject.value = "findColor";
+      findRegionMode.value = "custom";
+      findX1.value = event.region.x1;
+      findY1.value = event.region.y1;
+      findX2.value = event.region.x2;
+      findY2.value = event.region.y2;
+      findColorHex.value = event.color;
+      findColorThreshold.value = event.threshold;
+      findColorAction.value = event.action;
+      findColorWaitUntilFound.value = event.waitUntilFound;
       appendDelay.value = false;
       break;
   }
@@ -884,6 +1011,8 @@ function eventAction(event: DraftEvent) {
       return "延迟等待";
     case "findImage":
       return "找图";
+    case "findColor":
+      return "找色";
   }
 }
 
@@ -907,6 +1036,8 @@ function eventTarget(event: DraftEvent) {
       return `${event.ms} ms`;
     case "findImage":
       return `${event.threshold}% · ${event.action === "click" ? "点击" : "移动到"}`;
+    case "findColor":
+      return `${event.color} · ${event.action === "click" ? "点击" : "移动到"}`;
   }
 }
 
@@ -1241,9 +1372,114 @@ function buttonLabel(button: MouseButton) {
               直到找到为止
             </el-checkbox>
           </template>
+
+          <template v-if="operationObject === 'findColor'">
+            <el-form-item label="找色区域">
+              <div class="find-region-tools">
+                <el-button size="small" :disabled="!screenBounds" @click="applyFullSearchRegion">
+                  全图
+                </el-button>
+                <el-button size="small" :icon="Aim" @click="startFindRegionPick">
+                  选取区域
+                </el-button>
+              </div>
+              <div class="find-coordinate-grid">
+                <span>X1</span>
+                <el-input-number
+                  v-model="findX1"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  @change="handleFindRegionNumberChange"
+                />
+                <span>Y1</span>
+                <el-input-number
+                  v-model="findY1"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  @change="handleFindRegionNumberChange"
+                />
+                <span>X2</span>
+                <el-input-number
+                  v-model="findX2"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  @change="handleFindRegionNumberChange"
+                />
+                <span>Y2</span>
+                <el-input-number
+                  v-model="findY2"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  @change="handleFindRegionNumberChange"
+                />
+              </div>
+            </el-form-item>
+
+            <el-form-item label="目标颜色">
+              <div class="find-color-box">
+                <div class="find-color-preview" :style="{ backgroundColor: findColorHex }"></div>
+                <div class="find-color-inputs">
+                  <el-input
+                    v-model="findColorHex"
+                    maxlength="7"
+                    placeholder="#RRGGBB"
+                    @change="handleColorHexChange"
+                  />
+                  <el-button
+                    size="small"
+                    :icon="Aim"
+                    :class="{ active: pickingColor }"
+                    @click="startColorPick"
+                  >
+                    屏幕取色
+                  </el-button>
+                </div>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="色差阈值" class="inline-find-field">
+              <div class="threshold-row">
+                <el-input-number
+                  v-model="findColorThreshold"
+                  :min="0"
+                  :max="255"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  @change="handleColorThresholdChange"
+                />
+                <span>(0~255)</span>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="后续操作" class="inline-find-field">
+              <el-select v-model="findColorAction">
+                <el-option label="点击" value="click" />
+                <el-option label="移动到" value="move" />
+              </el-select>
+            </el-form-item>
+
+            <el-checkbox v-model="findColorWaitUntilFound" class="wait-until-found">
+              直到找到为止
+            </el-checkbox>
+
+            <el-button
+              size="small"
+              :icon="Search"
+              :loading="findingColorTest"
+              :disabled="!canAddEvent"
+              @click="testFindColor"
+            >
+              测试
+            </el-button>
+          </template>
         </el-form>
 
-        <div v-if="operationObject !== 'delay' && operationObject !== 'findImage'" class="append-delay-row">
+        <div v-if="operationObject !== 'delay' && operationObject !== 'findImage' && operationObject !== 'findColor'" class="append-delay-row">
           <el-checkbox v-model="appendDelay" size="small">添加延迟</el-checkbox>
           <el-input-number
             v-model="appendDelayMs"
@@ -1672,6 +1908,28 @@ function buttonLabel(button: MouseButton) {
 .wait-until-found {
   width: fit-content;
 }
+
+.find-color-box {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+}
+
+.find-color-preview {
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+
+.find-color-inputs {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+
 
 .append-delay-row {
   display: flex;

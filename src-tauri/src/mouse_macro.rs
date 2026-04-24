@@ -102,6 +102,14 @@ pub enum MacroEvent {
         #[serde(rename = "waitUntilFound", alias = "wait_until_found")]
         wait_until_found: bool,
     },
+    FindColor {
+        region: FindImageRegion,
+        color: String,
+        threshold: u8,
+        action: String,
+        #[serde(rename = "waitUntilFound", alias = "wait_until_found")]
+        wait_until_found: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +132,16 @@ pub struct FindImageRequest {
     pub wait_until_found: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindColorRequest {
+    pub region: FindImageRegion,
+    pub color: String,
+    pub threshold: u8,
+    pub action: String,
+    pub wait_until_found: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FindImageResult {
@@ -133,6 +151,14 @@ pub struct FindImageResult {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindColorResult {
+    pub found: bool,
+    pub x: i32,
+    pub y: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -435,6 +461,11 @@ impl MouseMacroRuntime {
         find_image_once(&request)
     }
 
+    pub fn test_find_color(&self, request: FindColorRequest) -> Result<FindColorResult, String> {
+        validate_find_color_request(&request)?;
+        find_color_once(&request)
+    }
+
     pub fn capture_region_image(
         &self,
         region: FindImageRegion,
@@ -682,6 +713,23 @@ fn play_macro_event(
             playback_flag,
             speed,
         ),
+        MacroEvent::FindColor {
+            region,
+            color,
+            threshold,
+            action,
+            wait_until_found,
+        } => play_find_color_event(
+            FindColorRequest {
+                region: region.clone(),
+                color: color.clone(),
+                threshold: *threshold,
+                action: action.clone(),
+                wait_until_found: *wait_until_found,
+            },
+            playback_flag,
+            speed,
+        ),
     }
 }
 
@@ -794,6 +842,110 @@ fn play_find_image_event(
 
         sleep_adjusted(250, speed);
     }
+}
+
+fn play_find_color_event(
+    request: FindColorRequest,
+    playback_flag: &AtomicBool,
+    speed: f64,
+) -> Result<(), String> {
+    validate_find_color_request(&request)?;
+    let region = normalize_region(&request.region)?;
+    let target_rgb = hex_to_rgb(&request.color)?;
+
+    loop {
+        let search_image = capture_region(&region)?;
+        let result = find_color_in_image(&search_image, target_rgb, request.threshold, &region);
+
+        if result.found {
+            simulate(&EventType::MouseMove {
+                x: f64::from(result.x),
+                y: f64::from(result.y),
+            })
+            .map_err(|err| err.to_string())?;
+
+            if request.action == "click" {
+                click_button(Button::Left, speed)?;
+            }
+            return Ok(());
+        }
+
+        if !request.wait_until_found || !playback_flag.load(Ordering::SeqCst) {
+            return Err("Color not found in search region".to_string());
+        }
+
+        sleep_adjusted(250, speed);
+    }
+}
+
+fn find_color_once(request: &FindColorRequest) -> Result<FindColorResult, String> {
+    validate_find_color_request(request)?;
+    let region = normalize_region(&request.region)?;
+    let target_rgb = hex_to_rgb(&request.color)?;
+    let search_image = capture_region(&region)?;
+    Ok(find_color_in_image(&search_image, target_rgb, request.threshold, &region))
+}
+
+fn find_color_in_image(
+    image: &RgbaImage,
+    target: (u8, u8, u8),
+    threshold: u8,
+    region: &FindImageRegion,
+) -> FindColorResult {
+    let (tr, tg, tb) = target;
+    let threshold = threshold as i32;
+
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            let pixel = image.get_pixel(x, y);
+            let r = pixel[0] as i32;
+            let g = pixel[1] as i32;
+            let b = pixel[2] as i32;
+
+            let dr = (r - tr as i32).abs();
+            let dg = (g - tg as i32).abs();
+            let db = (b - tb as i32).abs();
+
+            if dr <= threshold && dg <= threshold && db <= threshold {
+                return FindColorResult {
+                    found: true,
+                    x: region.x1 + x as i32,
+                    y: region.y1 + y as i32,
+                };
+            }
+        }
+    }
+
+    FindColorResult {
+        found: false,
+        x: 0,
+        y: 0,
+    }
+}
+
+fn validate_find_color_request(request: &FindColorRequest) -> Result<(), String> {
+    normalize_region(&request.region)?;
+    hex_to_rgb(&request.color)?;
+    validate_find_image_action(&request.action)?;
+    Ok(())
+}
+
+fn hex_to_rgb(hex: &str) -> Result<(u8, u8, u8), String> {
+    let hex = hex.trim();
+    let hex = if hex.starts_with('#') { &hex[1..] } else { hex };
+
+    if hex.len() != 6 {
+        return Err("Color must be a 6-digit hex value like #FF0000".to_string());
+    }
+
+    let r = u8::from_str_radix(&hex[0..2], 16)
+        .map_err(|_| "Invalid red component in hex color".to_string())?;
+    let g = u8::from_str_radix(&hex[2..4], 16)
+        .map_err(|_| "Invalid green component in hex color".to_string())?;
+    let b = u8::from_str_radix(&hex[4..6], 16)
+        .map_err(|_| "Invalid blue component in hex color".to_string())?;
+
+    Ok((r, g, b))
 }
 
 /// 预处理模板图：解码 -> 缩放 -> 转灰度。应在循环外调用，避免重复。
@@ -1100,6 +1252,21 @@ fn validate_macro_event(event: MacroEvent) -> Result<MacroEvent, String> {
                 image_data: image_data.clone(),
                 threshold: *threshold,
                 scale: *scale,
+                action: action.clone(),
+                wait_until_found: *wait_until_found,
+            })?;
+        }
+        MacroEvent::FindColor {
+            region,
+            color,
+            threshold,
+            action,
+            wait_until_found,
+        } => {
+            validate_find_color_request(&FindColorRequest {
+                region: region.clone(),
+                color: color.clone(),
+                threshold: *threshold,
                 action: action.clone(),
                 wait_until_found: *wait_until_found,
             })?;

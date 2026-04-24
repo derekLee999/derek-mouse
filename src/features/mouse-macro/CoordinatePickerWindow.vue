@@ -11,13 +11,24 @@ type ScreenBounds = {
   height: number;
 };
 
+type PickerMode = "coordinate" | "region" | "color";
+
+type PixelColor = {
+  r: number;
+  g: number;
+  b: number;
+  hex: string;
+};
+
 const currentWindow = getCurrentWindow();
-const pickerMode = new URLSearchParams(window.location.search).get("mode") === "region" ? "region" : "coordinate";
+const urlMode = new URLSearchParams(window.location.search).get("mode");
+const pickerMode: PickerMode = urlMode === "region" ? "region" : urlMode === "color" ? "color" : "coordinate";
 const screenBounds = ref<ScreenBounds | null>(null);
 const pointer = ref({ x: 0, y: 0 });
 const dragStart = ref<{ x: number; y: number } | null>(null);
 const viewport = ref({ width: window.innerWidth, height: window.innerHeight });
 const closing = ref(false);
+const pickedColor = ref<PixelColor | null>(null);
 
 const displayCoordinate = computed(() => {
   if (!screenBounds.value) return { x: 0, y: 0 };
@@ -60,11 +71,16 @@ onMounted(async () => {
 
   document.addEventListener("keydown", handleKeydown);
   window.addEventListener("resize", updateViewport);
+
+  if (pickerMode === "color") {
+    document.addEventListener("mousemove", handleColorPointerMove);
+  }
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("resize", updateViewport);
+  document.removeEventListener("mousemove", handleColorPointerMove);
   if (!closing.value) {
     void invoke("cancel_mouse_coordinate_pick");
   }
@@ -75,6 +91,30 @@ function handlePointerMove(event: MouseEvent) {
     x: event.clientX,
     y: event.clientY,
   };
+}
+
+let colorFetchTimeout: ReturnType<typeof setTimeout> | null = null;
+
+async function handleColorPointerMove(event: MouseEvent) {
+  pointer.value = {
+    x: event.clientX,
+    y: event.clientY,
+  };
+
+  if (colorFetchTimeout) {
+    clearTimeout(colorFetchTimeout);
+  }
+
+  colorFetchTimeout = setTimeout(async () => {
+    if (!screenBounds.value || closing.value) return;
+    const coord = displayCoordinate.value;
+    try {
+      const color = await invoke<PixelColor>("get_pixel_color", { x: coord.x, y: coord.y });
+      pickedColor.value = color;
+    } catch {
+      // ignore
+    }
+  }, 30);
 }
 
 function handlePointerDown(event: MouseEvent) {
@@ -122,13 +162,27 @@ function updateViewport() {
 }
 
 async function pickCoordinate(event: MouseEvent) {
-  if (pickerMode !== "coordinate") return;
+  if (pickerMode === "region") return;
   if (!screenBounds.value) return;
 
   pointer.value = {
     x: event.clientX,
     y: event.clientY,
   };
+
+  if (pickerMode === "color") {
+    closing.value = true;
+    const color = pickedColor.value;
+    if (!color) {
+      await closePicker(true);
+      return;
+    }
+    await invoke("finish_mouse_color_pick", {
+      request: { color: color.hex },
+    });
+    await currentWindow.close();
+    return;
+  }
 
   closing.value = true;
   await invoke("finish_mouse_coordinate_pick", {
@@ -198,6 +252,7 @@ function waitForOverlayToDisappear() {
     />
     <div
       class="coordinate-badge"
+      :class="{ 'color-badge': pickerMode === 'color' }"
       :style="{
         left: `${Math.min(pointer.x + 14, viewport.width - 154)}px`,
         top: `${Math.min(pointer.y + 14, viewport.height - 34)}px`,
@@ -206,6 +261,15 @@ function waitForOverlayToDisappear() {
       <template v-if="pickerMode === 'region' && displayRegion">
         {{ Math.abs(displayRegion.x2 - displayRegion.x1) }} x
         {{ Math.abs(displayRegion.y2 - displayRegion.y1) }}
+      </template>
+      <template v-else-if="pickerMode === 'color'">
+        <div
+          v-if="pickedColor"
+          class="color-swatch"
+          :style="{ backgroundColor: pickedColor.hex }"
+        />
+        <span>{{ displayCoordinate.x }}, {{ displayCoordinate.y }}</span>
+        <span v-if="pickedColor" class="color-hex">{{ pickedColor.hex }}</span>
       </template>
       <template v-else>
         {{ displayCoordinate.x }}, {{ displayCoordinate.y }}
@@ -276,5 +340,22 @@ body,
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.45),
     0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.color-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.color-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 3px;
+}
+
+.color-hex {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 </style>

@@ -73,7 +73,8 @@ export type MouseMacroEvent =
   | { kind: "keyDown"; key: string }
   | { kind: "keyUp"; key: string }
   | { kind: "delay"; ms: number }
-  | MouseMacroFindImageEvent;
+  | MouseMacroFindImageEvent
+  | MouseMacroFindColorEvent;
 
 export type MouseMacroFindImageAction = "click" | "move";
 
@@ -90,6 +91,15 @@ export type MouseMacroFindImageEvent = {
   imageData: string;
   threshold: number;
   scale: number;
+  action: MouseMacroFindImageAction;
+  waitUntilFound: boolean;
+};
+
+export type MouseMacroFindColorEvent = {
+  kind: "findColor";
+  region: MouseMacroFindImageRegion;
+  color: string;
+  threshold: number;
   action: MouseMacroFindImageAction;
   waitUntilFound: boolean;
 };
