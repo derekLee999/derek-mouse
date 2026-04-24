@@ -63,6 +63,33 @@ export type RecorderState = {
   playing: boolean;
 };
 
+export type MouseMacroEvent =
+  | { kind: "mouseClick"; button: MouseButton }
+  | { kind: "mouseDoubleClick"; button: MouseButton }
+  | { kind: "mouseDown"; button: MouseButton }
+  | { kind: "mouseUp"; button: MouseButton }
+  | { kind: "mouseMove"; x: number; y: number }
+  | { kind: "keyClick"; key: string }
+  | { kind: "keyDown"; key: string }
+  | { kind: "keyUp"; key: string }
+  | { kind: "delay"; ms: number };
+
+export type MouseMacroSummary = {
+  id: number;
+  name: string;
+  playbackSpeed: number;
+  loopPlayback: boolean;
+  createdAt: number;
+  updatedAt: number;
+  eventCount: number;
+};
+
+export type MouseMacroState = {
+  macros: MouseMacroSummary[];
+  selectedId: number | null;
+  playing: boolean;
+};
+
 export const mouseButtonOptions = [
   { label: "左键", value: "left" },
   { label: "中键", value: "middle" },

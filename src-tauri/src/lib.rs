@@ -1,7 +1,9 @@
 mod clicker;
 mod config;
 mod input;
+mod mouse_macro;
 mod recorder;
+mod screen;
 mod tray;
 
 use std::{
@@ -15,16 +17,23 @@ use std::{
 use clicker::{ClickerConfig, ClickerRuntime};
 use config::{load_config, save_config, AppConfig};
 use input::{listen, ActiveFeature, Event, HotkeyConfig};
+use mouse_macro::{
+    CreateMacroRequest, MouseMacroRuntime, UpdateMacroLoopPlaybackRequest,
+    UpdateMacroPlaybackSpeedRequest,
+};
 use recorder::{
     RecorderRuntime, RenameRecordingRequest, SaveEditedRecordingRequest,
     UpdateRecordingLoopPlaybackRequest, UpdateRecordingPlaybackSpeedRequest,
 };
+use screen::ScreenSnapshot;
 use tauri::{Emitter, Manager};
 
 struct AppState {
     active_feature: Mutex<ActiveFeature>,
     clicker: Arc<ClickerRuntime>,
     recorder: Arc<RecorderRuntime>,
+    mouse_macro: Arc<MouseMacroRuntime>,
+    coordinate_pick_session: Mutex<Option<CoordinatePickSession>>,
     show_window_on_global_hotkey_stop: AtomicBool,
     auto_hide_on_hotkey: AtomicBool,
 }
@@ -56,7 +65,10 @@ impl AppState {
 
         let status = if self.recorder.is_recording() {
             tray::TrayStatus::Recording
-        } else if self.recorder.is_playing() || self.clicker.is_running() {
+        } else if self.recorder.is_playing()
+            || self.mouse_macro.is_playing()
+            || self.clicker.is_running()
+        {
             tray::TrayStatus::Running
         } else if active_feature == ActiveFeature::Recorder {
             tray::TrayStatus::ReadyToRecord
@@ -73,6 +85,46 @@ impl AppState {
 struct GlobalHotkeyOptions {
     show_window_on_stop: bool,
     auto_hide_on_hotkey: bool,
+}
+
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PickedCoordinate {
+    x: u32,
+    y: u32,
+}
+
+#[derive(Debug, Clone)]
+struct CoordinatePickSession {
+    target_label: String,
+    snapshot: ScreenSnapshot,
+}
+
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CoordinatePickSnapshotMeta {
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CoordinatePickSnapshotPayload {
+    target_label: String,
+    image_path: String,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinishMouseCoordinatePickRequest {
+    x: u32,
+    y: u32,
 }
 
 #[tauri::command]
@@ -283,6 +335,166 @@ fn delete_recording(
     state.recorder.delete_recording(id)
 }
 
+#[tauri::command]
+fn get_mouse_macro_state(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<mouse_macro::MacroState, String> {
+    state.mouse_macro.state()
+}
+
+#[tauri::command]
+fn create_mouse_macro(
+    request: CreateMacroRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<mouse_macro::MacroState, String> {
+    state.mouse_macro.create_macro(request)
+}
+
+#[tauri::command]
+fn select_mouse_macro(
+    id: u64,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<mouse_macro::MacroState, String> {
+    state.mouse_macro.select_macro(id)
+}
+
+#[tauri::command]
+fn delete_mouse_macro(
+    id: u64,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<mouse_macro::MacroState, String> {
+    state.mouse_macro.delete_macro(id)
+}
+
+#[tauri::command]
+fn update_mouse_macro_playback_speed(
+    request: UpdateMacroPlaybackSpeedRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<mouse_macro::MacroState, String> {
+    state.mouse_macro.update_macro_playback_speed(request)
+}
+
+#[tauri::command]
+fn update_mouse_macro_loop_playback(
+    request: UpdateMacroLoopPlaybackRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<mouse_macro::MacroState, String> {
+    state.mouse_macro.update_macro_loop_playback(request)
+}
+
+#[tauri::command]
+fn play_mouse_macro(
+    id: u64,
+    state: tauri::State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<mouse_macro::MacroState, String> {
+    let result = state.mouse_macro.play_macro(id, app, false);
+    state.sync_tray_status();
+    result
+}
+
+#[tauri::command]
+fn stop_mouse_macro(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<mouse_macro::MacroState, String> {
+    let result = state.mouse_macro.stop_playback();
+    state.sync_tray_status();
+    result
+}
+
+#[tauri::command]
+fn start_mouse_coordinate_pick(
+    window_label: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<CoordinatePickSnapshotMeta, String> {
+    clear_coordinate_pick_session(&state)?;
+
+    let snapshot = screen::capture_virtual_screen()?;
+    let meta = CoordinatePickSnapshotMeta {
+        left: snapshot.left,
+        top: snapshot.top,
+        width: snapshot.width,
+        height: snapshot.height,
+    };
+
+    *state
+        .coordinate_pick_session
+        .lock()
+        .map_err(|err| err.to_string())? = Some(CoordinatePickSession {
+        target_label: window_label,
+        snapshot,
+    });
+
+    Ok(meta)
+}
+
+#[tauri::command]
+fn get_mouse_coordinate_pick_snapshot(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<CoordinatePickSnapshotPayload, String> {
+    let session = state
+        .coordinate_pick_session
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone()
+        .ok_or_else(|| "Coordinate picker is not active".to_string())?;
+
+    Ok(CoordinatePickSnapshotPayload {
+        target_label: session.target_label,
+        image_path: session.snapshot.image_path.to_string_lossy().to_string(),
+        left: session.snapshot.left,
+        top: session.snapshot.top,
+        width: session.snapshot.width,
+        height: session.snapshot.height,
+    })
+}
+
+#[tauri::command]
+fn finish_mouse_coordinate_pick(
+    request: FinishMouseCoordinatePickRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let session = state
+        .coordinate_pick_session
+        .lock()
+        .map_err(|err| err.to_string())?
+        .take()
+        .ok_or_else(|| "Coordinate picker is not active".to_string())?;
+    delete_snapshot_file(&session);
+
+    app.emit_to(
+        session.target_label,
+        "mouse-coordinate-picked",
+        PickedCoordinate {
+            x: request.x,
+            y: request.y,
+        },
+    )
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn cancel_mouse_coordinate_pick(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    clear_coordinate_pick_session(&state)
+}
+
+fn clear_coordinate_pick_session(state: &tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    let session = state
+        .coordinate_pick_session
+        .lock()
+        .map_err(|err| err.to_string())?
+        .take();
+    if let Some(session) = session {
+        delete_snapshot_file(&session);
+    }
+    Ok(())
+}
+
+fn delete_snapshot_file(session: &CoordinatePickSession) {
+    let _ = std::fs::remove_file(&session.snapshot.image_path);
+}
+
 fn spawn_global_listener(state: Arc<AppState>, app: tauri::AppHandle) {
     thread::spawn(move || {
         let listener_state = state.clone();
@@ -325,6 +537,14 @@ fn handle_global_event(state: &Arc<AppState>, app: &tauri::AppHandle, event: Eve
         show_window_on_global_hotkey_stop,
         auto_hide_on_hotkey,
     );
+    state.mouse_macro.handle_event(
+        &event,
+        app,
+        &hotkey,
+        active_feature == ActiveFeature::MouseMacro,
+        show_window_on_global_hotkey_stop,
+        auto_hide_on_hotkey,
+    );
     state.sync_tray_status();
 }
 
@@ -334,10 +554,13 @@ pub fn run() {
 
     let clicker = Arc::new(ClickerRuntime::from_config(config.clicker));
     let recorder = Arc::new(RecorderRuntime::new_with_hotkey(config.record_hotkey));
+    let mouse_macro = Arc::new(MouseMacroRuntime::new());
     let state = Arc::new(AppState {
         active_feature: Mutex::new(ActiveFeature::Clicker),
         clicker: clicker.clone(),
         recorder: recorder.clone(),
+        mouse_macro: mouse_macro.clone(),
+        coordinate_pick_session: Mutex::new(None),
         show_window_on_global_hotkey_stop: AtomicBool::new(config.show_window_on_stop),
         auto_hide_on_hotkey: AtomicBool::new(config.auto_hide_on_hotkey),
     });
@@ -385,7 +608,19 @@ pub fn run() {
             delete_recording,
             update_recording_playback_speed,
             update_recording_loop_playback,
-            save_edited_recording
+            save_edited_recording,
+            get_mouse_macro_state,
+            create_mouse_macro,
+            select_mouse_macro,
+            delete_mouse_macro,
+            update_mouse_macro_playback_speed,
+            update_mouse_macro_loop_playback,
+            play_mouse_macro,
+            stop_mouse_macro,
+            start_mouse_coordinate_pick,
+            get_mouse_coordinate_pick_snapshot,
+            finish_mouse_coordinate_pick,
+            cancel_mouse_coordinate_pick
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

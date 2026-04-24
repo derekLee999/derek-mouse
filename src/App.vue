@@ -1,16 +1,25 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { Mouse, VideoCamera } from "@element-plus/icons-vue";
+import { KnifeFork, Mouse, VideoCamera } from "@element-plus/icons-vue";
 import TitleBar from "./components/TitleBar.vue";
 import GlobalHotkeyBar from "./components/GlobalHotkeyBar.vue";
 import ClickerPanel from "./features/clicker/ClickerPanel.vue";
+import CoordinatePickerWindow from "./features/mouse-macro/CoordinatePickerWindow.vue";
+import MouseMacroEditorWindow from "./features/mouse-macro/MouseMacroEditorWindow.vue";
+import MouseMacroPanel from "./features/mouse-macro/MouseMacroPanel.vue";
 import RecordingEditorWindow from "./features/recorder/RecordingEditorWindow.vue";
 import RecorderPanel from "./features/recorder/RecorderPanel.vue";
 import type { HotkeyConfig } from "./types";
 
-const isRecordingEditor = new URLSearchParams(window.location.search).get("view") === "recording-editor";
-const activeTab = ref<"clicker" | "recorder">("clicker");
+type ActiveTab = "clicker" | "recorder" | "mouse-macro";
+
+const view = new URLSearchParams(window.location.search).get("view");
+const isRecordingEditor = view === "recording-editor";
+const isMouseMacroEditor = view === "mouse-macro-editor";
+const isCoordinatePicker = view === "coordinate-picker";
+const isSubWindow = isRecordingEditor || isMouseMacroEditor || isCoordinatePicker;
+const activeTab = ref<ActiveTab>("clicker");
 const recorderBusy = ref(false);
 const globalHotkey = ref<HotkeyConfig>({
   ctrl: false,
@@ -21,19 +30,19 @@ const globalHotkey = ref<HotkeyConfig>({
 watch(
   activeTab,
   (feature) => {
-    if (isRecordingEditor) return;
+    if (isSubWindow) return;
     void invoke("set_active_feature", { feature });
   },
   { immediate: true },
 );
 
 onMounted(() => {
-  if (isRecordingEditor) return;
+  if (isSubWindow) return;
   window.addEventListener("keydown", handleWindowKeydown);
 });
 
 onBeforeUnmount(() => {
-  if (isRecordingEditor) return;
+  if (isSubWindow) return;
   window.removeEventListener("keydown", handleWindowKeydown);
 });
 
@@ -43,12 +52,16 @@ function handleWindowKeydown(event: KeyboardEvent) {
   }
 
   event.preventDefault();
-  activeTab.value = activeTab.value === "clicker" ? "recorder" : "clicker";
+  const tabs: ActiveTab[] = ["clicker", "recorder", "mouse-macro"];
+  const currentIndex = tabs.indexOf(activeTab.value);
+  activeTab.value = tabs[(currentIndex + 1) % tabs.length];
 }
 </script>
 
 <template>
   <RecordingEditorWindow v-if="isRecordingEditor" />
+  <MouseMacroEditorWindow v-else-if="isMouseMacroEditor" />
+  <CoordinatePickerWindow v-else-if="isCoordinatePicker" />
   <main v-else class="app-shell">
     <TitleBar />
     <GlobalHotkeyBar v-model="globalHotkey" :disabled="activeTab === 'recorder' && recorderBusy" />
@@ -74,6 +87,17 @@ function handleWindowKeydown(event: KeyboardEvent) {
         </template>
 
         <RecorderPanel :hotkey="globalHotkey" @busy-change="recorderBusy = $event" />
+      </el-tab-pane>
+
+      <el-tab-pane name="mouse-macro">
+        <template #label>
+          <span class="tab-label">
+            <el-icon><KnifeFork /></el-icon>
+            鼠标宏
+          </span>
+        </template>
+
+        <MouseMacroPanel />
       </el-tab-pane>
     </el-tabs>
   </main>

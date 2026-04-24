@@ -37,12 +37,14 @@ struct KeyScan {
 pub enum ActiveFeature {
     Clicker,
     Recorder,
+    MouseMacro,
 }
 
 impl ActiveFeature {
     pub fn from_name(name: &str) -> Self {
         match name {
             "recorder" => Self::Recorder,
+            "mouse-macro" => Self::MouseMacro,
             _ => Self::Clicker,
         }
     }
@@ -283,6 +285,7 @@ pub enum EventType {
 pub struct Event {
     pub time: SystemTime,
     pub name: Option<String>,
+    pub position: Option<(f64, f64)>,
     pub event_type: EventType,
 }
 
@@ -465,10 +468,11 @@ pub fn key_needs_modifier(name: &str) -> bool {
 
 unsafe extern "system" fn raw_callback(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
-        if let Some(event_type) = convert_event(wparam, lparam) {
+        if let Some((event_type, position)) = convert_event(wparam, lparam) {
             let event = Event {
                 time: SystemTime::now(),
                 name: None,
+                position,
                 event_type,
             };
 
@@ -497,49 +501,82 @@ fn run_message_loop() -> Result<(), ListenError> {
     }
 }
 
-fn convert_event(wparam: WPARAM, lparam: LPARAM) -> Option<EventType> {
+fn convert_event(wparam: WPARAM, lparam: LPARAM) -> Option<(EventType, Option<(f64, f64)>)> {
     match wparam.0 as u32 {
-        WM_KEYDOWN | WM_SYSKEYDOWN => Some(EventType::KeyPress(key_from_vk(unsafe {
-            (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode
-        } as u16))),
-        WM_KEYUP | WM_SYSKEYUP => Some(EventType::KeyRelease(key_from_vk(unsafe {
-            (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode
-        } as u16))),
-        WM_LBUTTONDOWN => Some(EventType::ButtonPress(Button::Left)),
-        WM_LBUTTONUP => Some(EventType::ButtonRelease(Button::Left)),
-        WM_MBUTTONDOWN => Some(EventType::ButtonPress(Button::Middle)),
-        WM_MBUTTONUP => Some(EventType::ButtonRelease(Button::Middle)),
-        WM_RBUTTONDOWN => Some(EventType::ButtonPress(Button::Right)),
-        WM_RBUTTONUP => Some(EventType::ButtonRelease(Button::Right)),
-        WM_XBUTTONDOWN => Some(EventType::ButtonPress(Button::Unknown(
-            mouse_hiword(lparam) as u8,
-        ))),
-        WM_XBUTTONUP => Some(EventType::ButtonRelease(Button::Unknown(
-            mouse_hiword(lparam) as u8,
-        ))),
+        WM_KEYDOWN | WM_SYSKEYDOWN => Some((
+            EventType::KeyPress(key_from_vk(unsafe {
+                (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode
+            } as u16)),
+            None,
+        )),
+        WM_KEYUP | WM_SYSKEYUP => Some((
+            EventType::KeyRelease(key_from_vk(unsafe {
+                (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode
+            } as u16)),
+            None,
+        )),
+        WM_LBUTTONDOWN => Some((EventType::ButtonPress(Button::Left), mouse_position(lparam))),
+        WM_LBUTTONUP => Some((
+            EventType::ButtonRelease(Button::Left),
+            mouse_position(lparam),
+        )),
+        WM_MBUTTONDOWN => Some((
+            EventType::ButtonPress(Button::Middle),
+            mouse_position(lparam),
+        )),
+        WM_MBUTTONUP => Some((
+            EventType::ButtonRelease(Button::Middle),
+            mouse_position(lparam),
+        )),
+        WM_RBUTTONDOWN => Some((
+            EventType::ButtonPress(Button::Right),
+            mouse_position(lparam),
+        )),
+        WM_RBUTTONUP => Some((
+            EventType::ButtonRelease(Button::Right),
+            mouse_position(lparam),
+        )),
+        WM_XBUTTONDOWN => Some((
+            EventType::ButtonPress(Button::Unknown(mouse_hiword(lparam) as u8)),
+            mouse_position(lparam),
+        )),
+        WM_XBUTTONUP => Some((
+            EventType::ButtonRelease(Button::Unknown(mouse_hiword(lparam) as u8)),
+            mouse_position(lparam),
+        )),
         WM_MOUSEMOVE => {
             let mouse = unsafe { *(lparam.0 as *const MSLLHOOKSTRUCT) };
-            Some(EventType::MouseMove {
-                x: f64::from(mouse.pt.x),
-                y: f64::from(mouse.pt.y),
-            })
+            let x = f64::from(mouse.pt.x);
+            let y = f64::from(mouse.pt.y);
+            Some((EventType::MouseMove { x, y }, Some((x, y))))
         }
         WM_MOUSEWHEEL => {
             let delta = mouse_hiword(lparam) as i16;
-            Some(EventType::Wheel {
-                delta_x: 0,
-                delta_y: i64::from(delta / WHEEL_DELTA),
-            })
+            Some((
+                EventType::Wheel {
+                    delta_x: 0,
+                    delta_y: i64::from(delta / WHEEL_DELTA),
+                },
+                mouse_position(lparam),
+            ))
         }
         WM_MOUSEHWHEEL => {
             let delta = mouse_hiword(lparam) as i16;
-            Some(EventType::Wheel {
-                delta_x: i64::from(delta / WHEEL_DELTA),
-                delta_y: 0,
-            })
+            Some((
+                EventType::Wheel {
+                    delta_x: i64::from(delta / WHEEL_DELTA),
+                    delta_y: 0,
+                },
+                mouse_position(lparam),
+            ))
         }
         _ => None,
     }
+}
+
+fn mouse_position(lparam: LPARAM) -> Option<(f64, f64)> {
+    let mouse = unsafe { *(lparam.0 as *const MSLLHOOKSTRUCT) };
+    Some((f64::from(mouse.pt.x), f64::from(mouse.pt.y)))
 }
 
 fn mouse_hiword(lparam: LPARAM) -> u16 {
