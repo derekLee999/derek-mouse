@@ -26,9 +26,16 @@ fn main() {
         .ancestors()
         .nth(3)
         .expect("failed to find target dir");
-    let dll_src = r"C:\tools\opencv\opencv\build\x64\vc16\bin\opencv_world490.dll";
+    // Use the UPX-compressed DLL in the project dir if available
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let dll_src = std::path::Path::new(&manifest_dir).join("opencv_world490.dll");
+    let dll_src = if dll_src.exists() {
+        dll_src
+    } else {
+        std::path::PathBuf::from(r"C:\tools\opencv\opencv\build\x64\vc16\bin\opencv_world490.dll")
+    };
     let dll_dst = target_dir.join("opencv_world490.dll");
-    if let Err(e) = std::fs::copy(dll_src, &dll_dst) {
-        println!("cargo:warning=failed to copy OpenCV DLL: {}", e);
+    if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
+        println!("cargo:warning=failed to copy OpenCV DLL from {}: {}", dll_src.display(), e);
     }
 }
