@@ -13,9 +13,28 @@ use std::{
 use base64::{engine::general_purpose, Engine as _};
 use image::{
     imageops::{self, FilterType},
-    DynamicImage, GenericImage, ImageFormat, RgbaImage,
+    DynamicImage, GenericImage, GrayImage, ImageFormat, RgbaImage,
 };
-use imageproc::template_matching::{find_extremes, match_template_parallel, MatchTemplateMethod};
+// OpenCV FFI: 高度优化的 SIMD 模板匹配
+#[repr(C)]
+struct CvMatchResult {
+    score: f64,
+    x: i32,
+    y: i32,
+    found: i32,
+}
+
+extern "C" {
+    fn match_template_opencv(
+        search_data: *const u8,
+        search_w: i32,
+        search_h: i32,
+        template_data: *const u8,
+        template_w: i32,
+        template_h: i32,
+        threshold: f64,
+    ) -> CvMatchResult;
+}
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use xcap::Monitor;
@@ -672,15 +691,87 @@ fn click_button(button: Button, speed: f64) -> Result<(), String> {
     simulate(&EventType::ButtonRelease(button)).map_err(|err| err.to_string())
 }
 
+/// 根据搜索区域面积计算自动下采样比例。
+/// 当区域超过 1920×1080 时等比缩小，最低缩放到 25%，
+/// 将高分辨率屏幕（如 5K）的匹配开销降到 1080p 级别。
+fn compute_auto_scale(region: &FindImageRegion) -> f64 {
+    const MAX_SEARCH_PIXELS: u32 = 1920 * 1080;
+    const MIN_AUTO_SCALE: f64 = 0.25;
+
+    let width = (region.x2 - region.x1) as u32;
+    let height = (region.y2 - region.y1) as u32;
+    let area = width.saturating_mul(height);
+
+    if area <= MAX_SEARCH_PIXELS {
+        1.0
+    } else {
+        let scale = (MAX_SEARCH_PIXELS as f64 / area as f64).sqrt();
+        scale.max(MIN_AUTO_SCALE)
+    }
+}
+
 fn play_find_image_event(
     request: FindImageRequest,
     playback_flag: &AtomicBool,
     speed: f64,
 ) -> Result<(), String> {
     validate_find_image_request(&request)?;
+    // 搜索区域规范化、显示器预筛选、自动下采样比例均在循环外完成
+    let region = normalize_region(&request.region)?;
+    let monitors = Monitor::all().map_err(|e| e.to_string())?;
+    let relevant_monitors = find_relevant_monitors(&region, &monitors)?;
+    let auto_scale = compute_auto_scale(&region);
+
+    // 模板图预处理：用户 scale × 自动下采样比例
+    let effective_scale = request.scale * auto_scale;
+    let template_gray = prepare_template(&request.image_data, effective_scale)?;
 
     loop {
-        let result = find_image_once(&request)?;
+        let search_image = capture_region_with_monitors(&region, &relevant_monitors)?;
+
+        // 对搜索图下采样（高分辨率屏幕优化）
+        let search_gray = if (auto_scale - 1.0).abs() >= f64::EPSILON {
+            let sw = (f64::from(search_image.width()) * auto_scale).round().max(1.0) as u32;
+            let sh = (f64::from(search_image.height()) * auto_scale).round().max(1.0) as u32;
+            let resized = imageops::resize(&search_image, sw, sh, FilterType::Triangle);
+            imageops::grayscale(&resized)
+        } else {
+            imageops::grayscale(&search_image)
+        };
+
+        if template_gray.width() > search_gray.width() || template_gray.height() > search_gray.height() {
+            return Err("Template image is larger than the search region".to_string());
+        }
+
+        let cv_result = unsafe {
+            match_template_opencv(
+                search_gray.as_raw().as_ptr(),
+                search_gray.width() as i32,
+                search_gray.height() as i32,
+                template_gray.as_raw().as_ptr(),
+                template_gray.width() as i32,
+                template_gray.height() as i32,
+                request.threshold / 100.0,
+            )
+        };
+
+        // 将缩小后的匹配坐标映射回原始分辨率
+        let raw_loc_x = cv_result.x as f64 / auto_scale;
+        let raw_loc_y = cv_result.y as f64 / auto_scale;
+        let raw_template_w = template_gray.width() as f64 / auto_scale;
+        let raw_template_h = template_gray.height() as f64 / auto_scale;
+        let center_x = region.x1 + raw_loc_x.round() as i32;
+        let center_y = region.y1 + raw_loc_y.round() as i32;
+
+        let result = FindImageResult {
+            found: cv_result.found != 0,
+            score: cv_result.score,
+            x: center_x,
+            y: center_y,
+            width: raw_template_w.round() as u32,
+            height: raw_template_h.round() as u32,
+        };
+
         if result.found {
             simulate(&EventType::MouseMove {
                 x: f64::from(result.x),
@@ -705,57 +796,64 @@ fn play_find_image_event(
     }
 }
 
-fn find_image_once(request: &FindImageRequest) -> Result<FindImageResult, String> {
-    validate_find_image_request(request)?;
-
-    let region = normalize_region(&request.region)?;
-    let search_image = capture_region(&region)?;
-    let mut template = decode_macro_image(&request.image_data)?;
-    if (request.scale - 1.0).abs() >= f64::EPSILON {
-        let next_width = (f64::from(template.width()) * request.scale)
+/// 预处理模板图：解码 -> 缩放 -> 转灰度。应在循环外调用，避免重复。
+fn prepare_template(image_data: &str, scale: f64) -> Result<GrayImage, String> {
+    let mut template = decode_macro_image(image_data)?;
+    if (scale - 1.0).abs() >= f64::EPSILON {
+        let next_width = (f64::from(template.width()) * scale)
             .round()
             .max(1.0) as u32;
-        let next_height = (f64::from(template.height()) * request.scale)
+        let next_height = (f64::from(template.height()) * scale)
             .round()
             .max(1.0) as u32;
         template = imageops::resize(&template, next_width, next_height, FilterType::Triangle);
     }
+    Ok(DynamicImage::ImageRgba8(template).to_luma8())
+}
 
-    if template.width() > search_image.width() || template.height() > search_image.height() {
+/// 使用已预处理的灰度模板图执行单次查找。只做截图 + 匹配，不做模板预处理。
+fn find_image_with_prepared_template(
+    request: &FindImageRequest,
+    template_gray: &GrayImage,
+) -> Result<FindImageResult, String> {
+    let region = normalize_region(&request.region)?;
+    let search_image = capture_region(&region)?;
+
+    if template_gray.width() > search_image.width() || template_gray.height() > search_image.height() {
         return Err("Template image is larger than the search region".to_string());
     }
 
-    let search_gray = DynamicImage::ImageRgba8(search_image).to_luma8();
-    let template_gray = DynamicImage::ImageRgba8(template).to_luma8();
-    let scores = match_template_parallel(
-        &search_gray,
-        &template_gray,
-        MatchTemplateMethod::CrossCorrelationNormalized,
-    );
-    let extremes = find_extremes(&scores);
-    let score = if extremes.max_value.is_finite() {
-        (f64::from(extremes.max_value) * 100.0).clamp(0.0, 100.0)
-    } else {
-        0.0
+    let search_gray = imageops::grayscale(&search_image);
+
+    let result = unsafe {
+        match_template_opencv(
+            search_gray.as_raw().as_ptr(),
+            search_gray.width() as i32,
+            search_gray.height() as i32,
+            template_gray.as_raw().as_ptr(),
+            template_gray.width() as i32,
+            template_gray.height() as i32,
+            request.threshold / 100.0,
+        )
     };
-    let center_x =
-        region.x1 + extremes.max_value_location.0 as i32 + (template_gray.width() / 2) as i32;
-    let center_y =
-        region.y1 + extremes.max_value_location.1 as i32 + (template_gray.height() / 2) as i32;
 
     Ok(FindImageResult {
-        found: score >= request.threshold,
-        score,
-        x: center_x,
-        y: center_y,
+        found: result.found != 0,
+        score: result.score,
+        x: region.x1 + result.x,
+        y: region.y1 + result.y,
         width: template_gray.width(),
         height: template_gray.height(),
     })
 }
 
+fn find_image_once(request: &FindImageRequest) -> Result<FindImageResult, String> {
+    let template_gray = prepare_template(&request.image_data, request.scale)?;
+    find_image_with_prepared_template(request, &template_gray)
+}
+
 fn validate_find_image_request(request: &FindImageRequest) -> Result<(), String> {
     normalize_region(&request.region)?;
-    decode_macro_image(&request.image_data)?;
     normalize_find_image_threshold(request.threshold)?;
     normalize_find_image_scale(request.scale)?;
     validate_find_image_action(&request.action)?;
@@ -822,6 +920,30 @@ fn decode_macro_image(data_url: &str) -> Result<RgbaImage, String> {
     Ok(image.to_rgba8())
 }
 
+/// 筛选出与查找区域相交的显示器，避免每次循环遍历所有显示器
+fn find_relevant_monitors<'a>(
+    region: &FindImageRegion,
+    monitors: &'a [Monitor],
+) -> Result<Vec<&'a Monitor>, String> {
+    let mut relevant = Vec::with_capacity(monitors.len());
+    for monitor in monitors {
+        let mx = monitor.x().map_err(|e| e.to_string())?;
+        let my = monitor.y().map_err(|e| e.to_string())?;
+        let mright = mx + monitor.width().map_err(|e| e.to_string())? as i32;
+        let mbottom = my + monitor.height().map_err(|e| e.to_string())? as i32;
+
+        let left = region.x1.max(mx);
+        let top = region.y1.max(my);
+        let right = region.x2.min(mright);
+        let bottom = region.y2.min(mbottom);
+
+        if left < right && top < bottom {
+            relevant.push(monitor);
+        }
+    }
+    Ok(relevant)
+}
+
 fn capture_region(region: &FindImageRegion) -> Result<RgbaImage, String> {
     let width = u32::try_from(region.x2 - region.x1)
         .map_err(|_| "Search region width is invalid".to_string())?;
@@ -829,6 +951,68 @@ fn capture_region(region: &FindImageRegion) -> Result<RgbaImage, String> {
         .map_err(|_| "Search region height is invalid".to_string())?;
     let mut canvas = RgbaImage::new(width, height);
     let monitors = Monitor::all().map_err(|err| err.to_string())?;
+    let mut captured_any = false;
+
+    for monitor in monitors {
+        let monitor_x = monitor.x().map_err(|err| err.to_string())?;
+        let monitor_y = monitor.y().map_err(|err| err.to_string())?;
+        let monitor_width = monitor.width().map_err(|err| err.to_string())?;
+        let monitor_height = monitor.height().map_err(|err| err.to_string())?;
+        let monitor_right = monitor_x + monitor_width as i32;
+        let monitor_bottom = monitor_y + monitor_height as i32;
+
+        let left = region.x1.max(monitor_x);
+        let top = region.y1.max(monitor_y);
+        let right = region.x2.min(monitor_right);
+        let bottom = region.y2.min(monitor_bottom);
+
+        if left >= right || top >= bottom {
+            continue;
+        }
+
+        let part_width = u32::try_from(right - left)
+            .map_err(|_| "Capture region width is invalid".to_string())?;
+        let part_height = u32::try_from(bottom - top)
+            .map_err(|_| "Capture region height is invalid".to_string())?;
+        let part = monitor
+            .capture_region(
+                u32::try_from(left - monitor_x)
+                    .map_err(|_| "Capture region x is invalid".to_string())?,
+                u32::try_from(top - monitor_y)
+                    .map_err(|_| "Capture region y is invalid".to_string())?,
+                part_width,
+                part_height,
+            )
+            .map_err(|err| err.to_string())?;
+        canvas
+            .copy_from(
+                &part,
+                u32::try_from(left - region.x1)
+                    .map_err(|_| "Capture output x is invalid".to_string())?,
+                u32::try_from(top - region.y1)
+                    .map_err(|_| "Capture output y is invalid".to_string())?,
+            )
+            .map_err(|err| err.to_string())?;
+        captured_any = true;
+    }
+
+    if captured_any {
+        Ok(canvas)
+    } else {
+        Err("Search region is outside all screens".to_string())
+    }
+}
+
+/// 使用已预筛选的显示器列表截图，避免遍历所有显示器
+fn capture_region_with_monitors(
+    region: &FindImageRegion,
+    monitors: &[&Monitor],
+) -> Result<RgbaImage, String> {
+    let width = u32::try_from(region.x2 - region.x1)
+        .map_err(|_| "Search region width is invalid".to_string())?;
+    let height = u32::try_from(region.y2 - region.y1)
+        .map_err(|_| "Search region height is invalid".to_string())?;
+    let mut canvas = RgbaImage::new(width, height);
     let mut captured_any = false;
 
     for monitor in monitors {

@@ -37,6 +37,13 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "opencv_world490.dll": "opencv_world490.dll",
+      "MSVCP140.dll": "MSVCP140.dll",
+      "VCRUNTIME140.dll": "VCRUNTIME140.dll",
+      "VCRUNTIME140_1.dll": "VCRUNTIME140_1.dll",
+      "CONCRT140.dll": "CONCRT140.dll"
+    }
   }
 }
