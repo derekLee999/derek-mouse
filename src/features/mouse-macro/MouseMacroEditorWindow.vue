@@ -11,6 +11,7 @@ import {
   mouseButtonOptions,
   type MouseButton,
   type MouseMacroEvent,
+  type MouseMacroDetail,
   type MouseMacroState,
 } from "../../types";
 
@@ -36,6 +37,10 @@ type CoordinatePickSnapshotMeta = {
 
 const currentWindow = getCurrentWindow();
 
+const urlParams = new URLSearchParams(window.location.search);
+const editMacroId = urlParams.get("id");
+const isEditMode = editMacroId !== null;
+
 const macroName = ref(defaultMacroName());
 const events = ref<DraftEvent[]>([]);
 const saving = ref(false);
@@ -49,6 +54,8 @@ const delayMs = ref(100);
 const moveX = ref(0);
 const moveY = ref(0);
 const pickingCoordinate = ref(false);
+const appendDelay = ref(false);
+const appendDelayMs = ref(100);
 const eventMenu = ref<{
   visible: boolean;
   x: number;
@@ -61,8 +68,19 @@ const eventMenu = ref<{
   eventId: null,
 });
 
+const dropIndicatorIndex = ref<number | null>(null);
+
 let nextEventId = 1;
 let unlistenCoordinate: UnlistenFn | undefined;
+
+type DragState = {
+  index: number;
+  ghostEl: HTMLElement;
+  listEl: HTMLElement;
+  itemHeight: number;
+};
+
+let dragState: DragState | null = null;
 
 const mouseOperationOptions = [
   { label: "鼠标单击", value: "mouseClick" },
@@ -97,6 +115,19 @@ const canAddEvent = computed(() => {
 
 onMounted(async () => {
   alwaysOnTop.value = await currentWindow.isAlwaysOnTop();
+
+  if (isEditMode) {
+    try {
+      const detail = await invoke<MouseMacroDetail>("get_mouse_macro_detail", {
+        id: Number(editMacroId),
+      });
+      macroName.value = detail.name;
+      events.value = detail.events.map((event) => ({ ...event, id: nextEventId++ }));
+    } catch (error) {
+      ElMessage.error(String(error));
+    }
+  }
+
   unlistenCoordinate = await listen<PickedCoordinate>("mouse-coordinate-picked", (event) => {
     moveX.value = normalizeInteger(event.payload.x, 0, 0);
     moveY.value = normalizeInteger(event.payload.y, 0, 0);
@@ -118,11 +149,20 @@ onBeforeUnmount(() => {
 
 watch(operationObject, (value) => {
   closeEventMenu();
+  appendDelay.value = false;
   if (value === "mouse") {
     mouseOperation.value = "mouseClick";
   } else if (value === "keyboard") {
     keyboardOperation.value = "keyClick";
   }
+});
+
+watch(mouseOperation, () => {
+  appendDelay.value = false;
+});
+
+watch(keyboardOperation, () => {
+  appendDelay.value = false;
 });
 
 function defaultMacroName() {
@@ -185,6 +225,8 @@ async function startCoordinatePick() {
       height: snapshot.height,
       decorations: false,
       resizable: false,
+      transparent: true,
+      shadow: false,
       alwaysOnTop: true,
       skipTaskbar: true,
       focus: true,
@@ -217,8 +259,19 @@ function addEvent() {
     return;
   }
 
+  const newEvents: DraftEvent[] = [];
   const event = buildEvent();
-  events.value = [...events.value, { ...event, id: nextEventId++ } as DraftEvent];
+  newEvents.push({ ...event, id: nextEventId++ } as DraftEvent);
+
+  if (operationObject.value !== "delay" && appendDelay.value) {
+    newEvents.push({
+      kind: "delay",
+      ms: normalizeInteger(appendDelayMs.value, 100, 5, 60000),
+      id: nextEventId++,
+    } as DraftEvent);
+  }
+
+  events.value = [...events.value, ...newEvents];
   closeEventMenu();
 }
 
@@ -259,6 +312,88 @@ function closeEventMenu() {
   eventMenu.value.visible = false;
 }
 
+function handleMouseDown(event: MouseEvent, index: number) {
+  const target = event.currentTarget as HTMLElement;
+  const listEl = target.closest(".event-list") as HTMLElement;
+  const startY = event.clientY;
+  let hasMoved = false;
+
+  const onMouseMove = (e: MouseEvent) => {
+    if (!hasMoved && Math.abs(e.clientY - startY) < 4) return;
+
+    if (!hasMoved) {
+      hasMoved = true;
+      const rect = target.getBoundingClientRect();
+      const ghost = target.cloneNode(true) as HTMLElement;
+      ghost.style.position = "fixed";
+      ghost.style.left = `${rect.left}px`;
+      ghost.style.top = `${rect.top}px`;
+      ghost.style.width = `${rect.width}px`;
+      ghost.style.height = `${rect.height}px`;
+      ghost.style.opacity = "0.9";
+      ghost.style.pointerEvents = "none";
+      ghost.style.zIndex = "9999";
+      ghost.style.boxShadow = "0 4px 16px rgba(0,0,0,0.3)";
+      ghost.style.borderRadius = "8px";
+      document.body.appendChild(ghost);
+
+      target.style.opacity = "0.25";
+
+      dragState = {
+        index,
+        ghostEl: ghost,
+        listEl,
+        itemHeight: rect.height,
+      };
+    }
+
+    if (!dragState) return;
+
+    const ghost = dragState.ghostEl;
+    const rect = target.getBoundingClientRect();
+    ghost.style.left = `${rect.left}px`;
+    ghost.style.top = `${e.clientY - rect.height / 2}px`;
+
+    const listRect = listEl.getBoundingClientRect();
+    const scrollTop = listEl.scrollTop;
+    const relativeY = e.clientY - listRect.top + scrollTop;
+    const gap = 8;
+    const itemTotalHeight = dragState.itemHeight + gap;
+    let insertIndex = Math.round(relativeY / itemTotalHeight);
+    insertIndex = Math.max(0, Math.min(insertIndex, events.value.length));
+
+    if (insertIndex !== dropIndicatorIndex.value) {
+      dropIndicatorIndex.value = insertIndex;
+    }
+  };
+
+  const onMouseUp = () => {
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+
+    if (dragState) {
+      const fromIndex = dragState.index;
+      let toIndex = dropIndicatorIndex.value ?? events.value.length;
+
+      document.body.removeChild(dragState.ghostEl);
+      target.style.opacity = "";
+
+      if (fromIndex < toIndex) toIndex--;
+
+      if (toIndex !== fromIndex) {
+        const item = events.value.splice(fromIndex, 1)[0];
+        events.value.splice(toIndex, 0, item);
+      }
+
+      dragState = null;
+      dropIndicatorIndex.value = null;
+    }
+  };
+
+  document.addEventListener("mousemove", onMouseMove);
+  document.addEventListener("mouseup", onMouseUp);
+}
+
 function deleteEvent(eventId: number | null) {
   if (eventId === null) return;
   events.value = events.value.filter((event) => event.id !== eventId);
@@ -282,14 +417,25 @@ async function saveMacro() {
 
   saving.value = true;
   try {
-    const state = await invoke<MouseMacroState>("create_mouse_macro", {
-      request: {
-        name,
-        events: events.value.map(stripDraftId),
-      },
-    });
-    await emitTo("main", "mouse-macro-state", state);
-    ElMessage.success("已保存宏方案。");
+    let newState: MouseMacroState;
+    if (isEditMode) {
+      newState = await invoke<MouseMacroState>("update_mouse_macro", {
+        request: {
+          id: Number(editMacroId),
+          name,
+          events: events.value.map(stripDraftId),
+        },
+      });
+    } else {
+      newState = await invoke<MouseMacroState>("create_mouse_macro", {
+        request: {
+          name,
+          events: events.value.map(stripDraftId),
+        },
+      });
+    }
+    await emitTo("main", "mouse-macro-state", newState);
+    ElMessage.success(isEditMode ? "已更新宏方案。" : "已保存宏方案。");
     await closeWindow();
   } catch (error) {
     ElMessage.error(String(error));
@@ -368,7 +514,7 @@ function buttonLabel(button: MouseButton) {
     <header class="titlebar" @mousedown="startWindowDrag">
       <div class="titlebar-title">
         <img src="/app-icon.png" alt="" class="titlebar-icon" />
-        <span>新增鼠标宏</span>
+        <span>{{ isEditMode ? "编辑鼠标宏" : "新增鼠标宏" }}</span>
         <el-tag class="count-tag" type="success" effect="light" size="small">
           {{ events.length }} 个事件
         </el-tag>
@@ -419,18 +565,21 @@ function buttonLabel(button: MouseButton) {
     <section class="macro-workspace">
       <div class="event-list">
         <el-empty v-if="events.length === 0" description="还没有键鼠事件" />
-        <button
-          v-for="(event, index) in events"
-          v-else
-          :key="event.id"
-          type="button"
-          class="event-row"
-          @contextmenu="openEventMenu($event, event)"
-        >
-          <span class="event-index">#{{ index + 1 }}</span>
-          <span class="event-action">{{ eventAction(event) }}</span>
-          <span class="event-target">{{ eventTarget(event) }}</span>
-        </button>
+        <template v-for="(event, index) in events" v-else :key="event.id">
+          <div v-if="dropIndicatorIndex === index" class="drop-indicator" />
+          <div
+            class="event-row"
+            role="button"
+            tabindex="0"
+            @mousedown="handleMouseDown($event, index)"
+            @contextmenu="openEventMenu($event, event)"
+          >
+            <span class="event-index">#{{ index + 1 }}</span>
+            <span class="event-action">{{ eventAction(event) }}</span>
+            <span class="event-target">{{ eventTarget(event) }}</span>
+          </div>
+        </template>
+        <div v-if="dropIndicatorIndex === events.length" class="drop-indicator" />
       </div>
 
       <aside class="operation-panel">
@@ -482,7 +631,7 @@ function buttonLabel(button: MouseButton) {
               <span class="coordinate-label">
                 坐标
                 <el-tooltip
-                  :content="pickingCoordinate ? '取消取点' : '取当前点击位置'"
+                  content="点击拾取位置"
                   placement="top"
                 >
                   <button
@@ -545,6 +694,21 @@ function buttonLabel(button: MouseButton) {
             </div>
           </el-form-item>
         </el-form>
+
+        <div v-if="operationObject !== 'delay'" class="append-delay-row">
+          <el-checkbox v-model="appendDelay" size="small">添加延迟</el-checkbox>
+          <el-input-number
+            v-model="appendDelayMs"
+            :min="5"
+            :max="60000"
+            :step="5"
+            :precision="0"
+            controls-position="right"
+            :disabled="!appendDelay"
+            size="small"
+          />
+          <span :class="{ disabled: !appendDelay }">毫秒</span>
+        </div>
 
         <el-button type="primary" plain :icon="Plus" :disabled="!canAddEvent" @click="addEvent">
           添加
@@ -699,7 +863,8 @@ function buttonLabel(button: MouseButton) {
   background: var(--el-fill-color-blank);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
-  cursor: default;
+  cursor: grab;
+  user-select: none;
 }
 
 .event-row:hover {
@@ -806,6 +971,31 @@ function buttonLabel(button: MouseButton) {
   white-space: nowrap;
 }
 
+.append-delay-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+
+.append-delay-row .el-input-number {
+  width: 110px;
+}
+
+.append-delay-row span {
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.append-delay-row span.disabled {
+  color: var(--el-text-color-placeholder);
+}
+
 .event-context-menu {
   position: fixed;
   z-index: 4000;
@@ -842,5 +1032,17 @@ function buttonLabel(button: MouseButton) {
 .event-context-item.danger:hover {
   color: #ffffff;
   background: var(--el-color-danger);
+}
+
+.event-row:active {
+  cursor: grabbing;
+}
+
+.drop-indicator {
+  height: 2px;
+  background: var(--el-color-primary);
+  border-radius: 1px;
+  margin: 2px 0;
+  pointer-events: none;
 }
 </style>

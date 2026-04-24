@@ -22,6 +22,7 @@ const appWindow = getCurrentWindow();
 const themeMode = ref<ThemeMode>("system");
 const closeAction = ref<CloseAction>("hide");
 const settingsVisible = ref(false);
+const exitMenuVisible = ref(false);
 
 const systemDarkQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -127,6 +128,22 @@ async function closeWindow() {
 async function startWindowDrag() {
   await appWindow.startDragging();
 }
+
+function exitApp() {
+  exitMenuVisible.value = false;
+  void appWindow.destroy();
+}
+
+function showExitMenu() {
+  exitMenuVisible.value = true;
+  setTimeout(() => {
+    document.addEventListener("click", hideExitMenu, { once: true });
+  }, 0);
+}
+
+function hideExitMenu() {
+  exitMenuVisible.value = false;
+}
 </script>
 
 <template>
@@ -172,15 +189,23 @@ async function startWindowDrag() {
       >
         <el-icon><Minus /></el-icon>
       </button>
-      <button
-        class="window-action close"
-        type="button"
-        title="关闭"
-        aria-label="关闭"
-        @click="closeWindow"
-      >
-        <el-icon><Close /></el-icon>
-      </button>
+      <div class="close-wrapper">
+        <button
+          class="window-action close"
+          type="button"
+          title="关闭"
+          aria-label="关闭"
+          @click="closeWindow"
+          @contextmenu.prevent="showExitMenu"
+        >
+          <el-icon><Close /></el-icon>
+        </button>
+        <div v-if="exitMenuVisible" class="exit-menu" @click.stop>
+          <button type="button" class="exit-menu-item" @click="exitApp">
+            退出程序
+          </button>
+        </div>
+      </div>
     </div>
 
     <el-dialog
@@ -372,6 +397,42 @@ async function startWindowDrag() {
 }
 
 .window-action.close:hover {
+  color: #ffffff;
+  background: #e81123;
+}
+
+.close-wrapper {
+  position: relative;
+  height: 100%;
+}
+
+.exit-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 9999;
+  display: grid;
+  width: 112px;
+  padding: 6px;
+  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  box-shadow: var(--el-box-shadow-light);
+}
+
+.exit-menu-item {
+  height: 30px;
+  padding: 0 10px;
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.exit-menu-item:hover {
   color: #ffffff;
   background: #e81123;
 }

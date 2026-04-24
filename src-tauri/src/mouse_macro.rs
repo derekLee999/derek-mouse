@@ -89,6 +89,26 @@ pub struct UpdateMacroLoopPlaybackRequest {
     value: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacroDetail {
+    pub id: u64,
+    pub name: String,
+    pub playback_speed: f64,
+    pub loop_playback: bool,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub events: Vec<MacroEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMacroRequest {
+    pub id: u64,
+    pub name: String,
+    pub events: Vec<MacroEvent>,
+}
+
 pub struct MouseMacroRuntime {
     macros: Mutex<Vec<MacroScheme>>,
     selected_id: Mutex<Option<u64>>,
@@ -371,6 +391,54 @@ impl MouseMacroRuntime {
             }
             _ => {}
         }
+    }
+
+    pub fn macro_detail(&self, id: u64) -> Result<MacroDetail, String> {
+        let macros = self.macros.lock().map_err(|err| err.to_string())?;
+        let scheme = macros
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+            .ok_or_else(|| "Macro not found".to_string())?;
+        Ok(MacroDetail {
+            id: scheme.id,
+            name: scheme.name.clone(),
+            playback_speed: scheme.playback_speed,
+            loop_playback: scheme.loop_playback,
+            created_at: scheme.created_at,
+            updated_at: scheme.updated_at,
+            events: scheme.events.clone(),
+        })
+    }
+
+    pub fn update_macro(&self, request: UpdateMacroRequest) -> Result<MacroState, String> {
+        if self.playing.load(Ordering::SeqCst) {
+            return Err("Macro playback is running".to_string());
+        }
+
+        let name = normalize_name(&request.name)?;
+        if request.events.is_empty() {
+            return Err("Macro event list cannot be empty".to_string());
+        }
+
+        let events = request
+            .events
+            .into_iter()
+            .map(validate_macro_event)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut macros = self.macros.lock().map_err(|err| err.to_string())?;
+        let Some(scheme) = macros.iter_mut().find(|item| item.id == request.id) else {
+            return Err("Macro not found".to_string());
+        };
+
+        scheme.name = name;
+        scheme.events = events;
+        scheme.updated_at = unix_ms();
+        drop(macros);
+
+        self.persist();
+        self.make_state()
     }
 
     fn make_state(&self) -> Result<MacroState, String> {

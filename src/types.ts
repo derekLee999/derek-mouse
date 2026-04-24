@@ -84,6 +84,16 @@ export type MouseMacroSummary = {
   eventCount: number;
 };
 
+export type MouseMacroDetail = {
+  id: number;
+  name: string;
+  playbackSpeed: number;
+  loopPlayback: boolean;
+  createdAt: number;
+  updatedAt: number;
+  events: MouseMacroEvent[];
+};
+
 export type MouseMacroState = {
   macros: MouseMacroSummary[];
   selectedId: number | null;

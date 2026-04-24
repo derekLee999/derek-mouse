@@ -119,7 +119,7 @@ function openMacroMenu(event: MouseEvent, macro: MouseMacroSummary) {
   closeSpeedMenu();
 
   const menuWidth = 112;
-  const menuHeight = 42;
+  const menuHeight = 84;
   macroMenu.value = {
     visible: true,
     x: Math.min(event.clientX, window.innerWidth - menuWidth - 8),
@@ -145,6 +145,54 @@ function handleDocumentKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     closeFloatingMenus();
   }
+}
+
+async function handleMenuEdit() {
+  const macro = macroMenu.value.macro;
+  closeMacroMenu();
+  if (!macro || state.value.playing) return;
+  await openEditWindow(macro.id);
+}
+
+async function openEditWindow(macroId: number) {
+  if (state.value.playing) return;
+
+  const label = `mouse-macro-editor-${Date.now()}`;
+  const mainWindow = getCurrentWindow();
+  await mainWindow.setEnabled(false);
+
+  const restoreMainWindow = async () => {
+    await mainWindow.setEnabled(true);
+    await mainWindow.setFocus();
+    await refreshState();
+  };
+
+  const editor = new WebviewWindow(label, {
+    url: `/index.html?view=mouse-macro-editor&id=${macroId}`,
+    title: "编辑鼠标宏",
+    width: 880,
+    height: 720,
+    minWidth: 760,
+    minHeight: 620,
+    center: true,
+    resizable: true,
+    decorations: false,
+    minimizable: false,
+    maximizable: false,
+    parent: mainWindow,
+    focus: true,
+  });
+
+  editor.once("tauri://created", async () => {
+    await editor.setFocus();
+  });
+  editor.once(TauriEvent.WINDOW_DESTROYED, () => {
+    void restoreMainWindow();
+  });
+  editor.once("tauri://error", async (event) => {
+    await restoreMainWindow();
+    ElMessage.error(String(event.payload));
+  });
 }
 
 async function handleMenuDelete() {
@@ -315,6 +363,9 @@ function formatTime(timestamp: number) {
       @mousedown.stop
       @contextmenu.prevent
     >
+      <button type="button" class="context-menu-item" @click="handleMenuEdit">
+        编辑
+      </button>
       <button type="button" class="context-menu-item danger" @click="handleMenuDelete">
         删除
       </button>

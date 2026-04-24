@@ -3,7 +3,6 @@ mod config;
 mod input;
 mod mouse_macro;
 mod recorder;
-mod screen;
 mod tray;
 
 use std::{
@@ -18,15 +17,18 @@ use clicker::{ClickerConfig, ClickerRuntime};
 use config::{load_config, save_config, AppConfig};
 use input::{listen, ActiveFeature, Event, HotkeyConfig};
 use mouse_macro::{
-    CreateMacroRequest, MouseMacroRuntime, UpdateMacroLoopPlaybackRequest,
-    UpdateMacroPlaybackSpeedRequest,
+    CreateMacroRequest, MacroDetail, MouseMacroRuntime, UpdateMacroLoopPlaybackRequest,
+    UpdateMacroPlaybackSpeedRequest, UpdateMacroRequest,
 };
 use recorder::{
     RecorderRuntime, RenameRecordingRequest, SaveEditedRecordingRequest,
     UpdateRecordingLoopPlaybackRequest, UpdateRecordingPlaybackSpeedRequest,
 };
-use screen::ScreenSnapshot;
 use tauri::{Emitter, Manager};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN,
+};
 
 struct AppState {
     active_feature: Mutex<ActiveFeature>,
@@ -97,7 +99,10 @@ struct PickedCoordinate {
 #[derive(Debug, Clone)]
 struct CoordinatePickSession {
     target_label: String,
-    snapshot: ScreenSnapshot,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, serde::Serialize, Clone)]
@@ -113,7 +118,6 @@ struct CoordinatePickSnapshotMeta {
 #[serde(rename_all = "camelCase")]
 struct CoordinatePickSnapshotPayload {
     target_label: String,
-    image_path: String,
     left: i32,
     top: i32,
     width: u32,
@@ -343,11 +347,27 @@ fn get_mouse_macro_state(
 }
 
 #[tauri::command]
+fn get_mouse_macro_detail(
+    id: u64,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<MacroDetail, String> {
+    state.mouse_macro.macro_detail(id)
+}
+
+#[tauri::command]
 fn create_mouse_macro(
     request: CreateMacroRequest,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<mouse_macro::MacroState, String> {
     state.mouse_macro.create_macro(request)
+}
+
+#[tauri::command]
+fn update_mouse_macro(
+    request: UpdateMacroRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<mouse_macro::MacroState, String> {
+    state.mouse_macro.update_macro(request)
 }
 
 #[tauri::command]
@@ -409,12 +429,20 @@ fn start_mouse_coordinate_pick(
 ) -> Result<CoordinatePickSnapshotMeta, String> {
     clear_coordinate_pick_session(&state)?;
 
-    let snapshot = screen::capture_virtual_screen()?;
+    let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+
+    if width <= 0 || height <= 0 {
+        return Err("Could not determine screen size".to_string());
+    }
+
     let meta = CoordinatePickSnapshotMeta {
-        left: snapshot.left,
-        top: snapshot.top,
-        width: snapshot.width,
-        height: snapshot.height,
+        left,
+        top,
+        width: width as u32,
+        height: height as u32,
     };
 
     *state
@@ -422,7 +450,10 @@ fn start_mouse_coordinate_pick(
         .lock()
         .map_err(|err| err.to_string())? = Some(CoordinatePickSession {
         target_label: window_label,
-        snapshot,
+        left,
+        top,
+        width: width as u32,
+        height: height as u32,
     });
 
     Ok(meta)
@@ -441,11 +472,10 @@ fn get_mouse_coordinate_pick_snapshot(
 
     Ok(CoordinatePickSnapshotPayload {
         target_label: session.target_label,
-        image_path: session.snapshot.image_path.to_string_lossy().to_string(),
-        left: session.snapshot.left,
-        top: session.snapshot.top,
-        width: session.snapshot.width,
-        height: session.snapshot.height,
+        left: session.left,
+        top: session.top,
+        width: session.width,
+        height: session.height,
     })
 }
 
@@ -461,7 +491,6 @@ fn finish_mouse_coordinate_pick(
         .map_err(|err| err.to_string())?
         .take()
         .ok_or_else(|| "Coordinate picker is not active".to_string())?;
-    delete_snapshot_file(&session);
 
     app.emit_to(
         session.target_label,
@@ -480,19 +509,12 @@ fn cancel_mouse_coordinate_pick(state: tauri::State<'_, Arc<AppState>>) -> Resul
 }
 
 fn clear_coordinate_pick_session(state: &tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
-    let session = state
+    let _ = state
         .coordinate_pick_session
         .lock()
         .map_err(|err| err.to_string())?
         .take();
-    if let Some(session) = session {
-        delete_snapshot_file(&session);
-    }
     Ok(())
-}
-
-fn delete_snapshot_file(session: &CoordinatePickSession) {
-    let _ = std::fs::remove_file(&session.snapshot.image_path);
 }
 
 fn spawn_global_listener(state: Arc<AppState>, app: tauri::AppHandle) {
@@ -610,7 +632,9 @@ pub fn run() {
             update_recording_loop_playback,
             save_edited_recording,
             get_mouse_macro_state,
+            get_mouse_macro_detail,
             create_mouse_macro,
+            update_mouse_macro,
             select_mouse_macro,
             delete_mouse_macro,
             update_mouse_macro_playback_speed,

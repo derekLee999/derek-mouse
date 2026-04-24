@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ElMessage } from "element-plus";
 
-type CoordinatePickSnapshot = {
-  imagePath: string;
+type ScreenBounds = {
   left: number;
   top: number;
   width: number;
@@ -13,25 +12,23 @@ type CoordinatePickSnapshot = {
 };
 
 const currentWindow = getCurrentWindow();
-const snapshot = ref<CoordinatePickSnapshot | null>(null);
-const imageSrc = computed(() => snapshot.value ? convertFileSrc(snapshot.value.imagePath) : "");
-const imageError = ref("");
+const screenBounds = ref<ScreenBounds | null>(null);
 const pointer = ref({ x: 0, y: 0 });
 const viewport = ref({ width: window.innerWidth, height: window.innerHeight });
 const closing = ref(false);
 
 const displayCoordinate = computed(() => {
-  if (!snapshot.value) return { x: 0, y: 0 };
+  if (!screenBounds.value) return { x: 0, y: 0 };
 
   return {
-    x: Math.max(0, Math.round(snapshot.value.left + pointer.value.x * scaleX())),
-    y: Math.max(0, Math.round(snapshot.value.top + pointer.value.y * scaleY())),
+    x: Math.max(0, Math.round(screenBounds.value.left + pointer.value.x * scaleX())),
+    y: Math.max(0, Math.round(screenBounds.value.top + pointer.value.y * scaleY())),
   };
 });
 
 onMounted(async () => {
   try {
-    snapshot.value = await invoke<CoordinatePickSnapshot>("get_mouse_coordinate_pick_snapshot");
+    screenBounds.value = await invoke<ScreenBounds>("get_mouse_coordinate_pick_snapshot");
     await currentWindow.setFocus();
   } catch (error) {
     ElMessage.error(String(error));
@@ -57,10 +54,6 @@ function handlePointerMove(event: MouseEvent) {
   };
 }
 
-function handleImageError() {
-  imageError.value = "截图加载失败，请按 Esc 退出后重试。";
-}
-
 function updateViewport() {
   viewport.value = {
     width: window.innerWidth,
@@ -69,7 +62,7 @@ function updateViewport() {
 }
 
 async function pickCoordinate(event: MouseEvent) {
-  if (!snapshot.value) return;
+  if (!screenBounds.value) return;
 
   pointer.value = {
     x: event.clientX,
@@ -99,27 +92,16 @@ async function closePicker(cancel: boolean) {
 }
 
 function scaleX() {
-  return snapshot.value ? snapshot.value.width / Math.max(viewport.value.width, 1) : 1;
+  return screenBounds.value ? screenBounds.value.width / Math.max(viewport.value.width, 1) : 1;
 }
 
 function scaleY() {
-  return snapshot.value ? snapshot.value.height / Math.max(viewport.value.height, 1) : 1;
+  return screenBounds.value ? screenBounds.value.height / Math.max(viewport.value.height, 1) : 1;
 }
 </script>
 
 <template>
-  <main class="coordinate-picker" @mousemove="handlePointerMove" @click="pickCoordinate">
-    <img
-      v-if="snapshot"
-      class="screen-image"
-      :src="imageSrc"
-      alt=""
-      draggable="false"
-      @error="handleImageError"
-    />
-    <div v-if="imageError" class="error-panel" @click.stop>
-      {{ imageError }}
-    </div>
+  <main class="coordinate-picker" @mousemove="handlePointerMove" @click="pickCoordinate" @contextmenu.prevent="closePicker(true)">
     <div class="crosshair horizontal" :style="{ top: `${pointer.y}px` }" />
     <div class="crosshair vertical" :style="{ left: `${pointer.x}px` }" />
     <div
@@ -134,30 +116,29 @@ function scaleY() {
   </main>
 </template>
 
+<style>
+html,
+body,
+#app {
+  background: transparent !important;
+}
+</style>
+
 <style scoped>
 .coordinate-picker {
   position: fixed;
   inset: 0;
   overflow: hidden;
-  background: #000000;
+  background: transparent;
   cursor: crosshair;
   user-select: none;
-}
-
-.screen-image {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: fill;
-  pointer-events: none;
 }
 
 .crosshair {
   position: fixed;
   z-index: 2;
   pointer-events: none;
-  background: rgba(45, 212, 191, 0.9);
+  background: #409EFF;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
 }
 
@@ -186,22 +167,5 @@ function scaleY() {
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 6px;
   pointer-events: none;
-}
-
-.error-panel {
-  position: fixed;
-  left: 50%;
-  top: 50%;
-  z-index: 4;
-  max-width: 320px;
-  padding: 12px 14px;
-  color: #ffffff;
-  font-size: 13px;
-  line-height: 1.6;
-  text-align: center;
-  background: rgba(0, 0, 0, 0.78);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
-  transform: translate(-50%, -50%);
 }
 </style>
