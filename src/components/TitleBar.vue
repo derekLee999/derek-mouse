@@ -137,7 +137,10 @@ function exitApp() {
 function showExitMenu() {
   exitMenuVisible.value = true;
   setTimeout(() => {
-    document.addEventListener("click", hideExitMenu, { once: true });
+    // 监听 mousedown 而不是 click：
+    // 点击标题栏拖动时 Tauri 会消费鼠标事件，导致 click 不触发，
+    // 但 mousedown 一定会正常冒泡到 document
+    document.addEventListener("mousedown", hideExitMenu, { once: true });
   }, 0);
 }
 
@@ -200,7 +203,7 @@ function hideExitMenu() {
         >
           <el-icon><Close /></el-icon>
         </button>
-        <div v-if="exitMenuVisible" class="exit-menu" @click.stop>
+        <div v-if="exitMenuVisible" class="exit-menu" @click.stop @mousedown.stop>
           <button type="button" class="exit-menu-item" @click="exitApp">
             退出程序
           </button>

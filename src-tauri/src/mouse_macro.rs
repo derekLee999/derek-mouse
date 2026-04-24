@@ -288,10 +288,22 @@ impl MouseMacroRuntime {
         thread::spawn(move || {
             let speed = scheme.playback_speed.max(0.1);
             loop {
-                for event in &scheme.events {
+                for (i, event) in scheme.events.iter().enumerate() {
                     if !playback_flag.load(Ordering::SeqCst) {
                         break;
                     }
+
+                    // mouseMove 后的 mouseClick / mouseDoubleClick 前默认插入 10ms 延迟
+                    if i > 0 {
+                        if let (
+                            MacroEvent::MouseMove { .. },
+                            MacroEvent::MouseClick { .. } | MacroEvent::MouseDoubleClick { .. },
+                        ) = (&scheme.events[i - 1], event)
+                        {
+                            sleep_adjusted(10, speed);
+                        }
+                    }
+
                     injecting_flag.store(true, Ordering::SeqCst);
                     let _ = play_macro_event(event, speed);
                     injecting_flag.store(false, Ordering::SeqCst);

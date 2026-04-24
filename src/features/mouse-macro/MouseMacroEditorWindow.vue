@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, TauriEvent, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -21,6 +21,7 @@ type KeyboardOperation = "keyClick" | "keyDown" | "keyUp";
 
 type DraftEvent = MouseMacroEvent & {
   id: number;
+  followUp?: "mouseClick" | "mouseDoubleClick";
 };
 
 type PickedCoordinate = {
@@ -56,6 +57,8 @@ const moveY = ref(0);
 const pickingCoordinate = ref(false);
 const appendDelay = ref(false);
 const appendDelayMs = ref(100);
+const followUpAction = ref<"none" | "mouseClick" | "mouseDoubleClick">("none");
+const selectedEventId = ref<number | null>(null);
 const eventMenu = ref<{
   visible: boolean;
   x: number;
@@ -122,7 +125,7 @@ onMounted(async () => {
         id: Number(editMacroId),
       });
       macroName.value = detail.name;
-      events.value = detail.events.map((event) => ({ ...event, id: nextEventId++ }));
+      events.value = mergeFollowUpEvents(detail.events);
     } catch (error) {
       ElMessage.error(String(error));
     }
@@ -159,6 +162,7 @@ watch(operationObject, (value) => {
 
 watch(mouseOperation, () => {
   appendDelay.value = false;
+  followUpAction.value = "none";
 });
 
 watch(keyboardOperation, () => {
@@ -260,8 +264,19 @@ function addEvent() {
   }
 
   const newEvents: DraftEvent[] = [];
-  const event = buildEvent();
-  newEvents.push({ ...event, id: nextEventId++ } as DraftEvent);
+
+  if (operationObject.value === "mouse" && mouseOperation.value === "mouseMove") {
+    newEvents.push({
+      kind: "mouseMove",
+      x: normalizeInteger(moveX.value, 0, 0),
+      y: normalizeInteger(moveY.value, 0, 0),
+      ...(followUpAction.value !== "none" ? { followUp: followUpAction.value } : {}),
+      id: nextEventId++,
+    } as DraftEvent);
+  } else {
+    const event = buildEvent();
+    newEvents.push({ ...event, id: nextEventId++ } as DraftEvent);
+  }
 
   if (operationObject.value !== "delay" && appendDelay.value) {
     newEvents.push({
@@ -272,6 +287,7 @@ function addEvent() {
   }
 
   events.value = [...events.value, ...newEvents];
+  selectedEventId.value = null;
   closeEventMenu();
 }
 
@@ -295,6 +311,33 @@ function buildEvent(): MouseMacroEvent {
   return { kind: mouseOperation.value, button: selectedButton.value };
 }
 
+function updateEvent() {
+  if (selectedEventId.value === null) return;
+
+  const index = events.value.findIndex((e) => e.id === selectedEventId.value);
+  if (index === -1) return;
+
+  if (!canAddEvent.value) {
+    ElMessage.warning("请先补全有效的操作输入。");
+    return;
+  }
+
+  const updated = buildEvent();
+  const oldEvent = events.value[index];
+
+  if (updated.kind === "mouseMove" && followUpAction.value !== "none") {
+    events.value[index] = {
+      ...updated,
+      followUp: followUpAction.value,
+      id: oldEvent.id,
+    } as DraftEvent;
+  } else {
+    events.value[index] = { ...updated, id: oldEvent.id } as DraftEvent;
+  }
+
+  events.value = [...events.value];
+}
+
 function openEventMenu(event: MouseEvent, macroEvent: DraftEvent) {
   event.preventDefault();
 
@@ -310,6 +353,44 @@ function openEventMenu(event: MouseEvent, macroEvent: DraftEvent) {
 
 function closeEventMenu() {
   eventMenu.value.visible = false;
+}
+
+function restoreEventToEditor(event: DraftEvent) {
+  switch (event.kind) {
+    case "mouseMove":
+      operationObject.value = "mouse";
+      mouseOperation.value = "mouseMove";
+      moveX.value = event.x ?? 0;
+      moveY.value = event.y ?? 0;
+      appendDelay.value = false;
+      // 延迟设置 followUpAction，避免被 mouseOperation 的 watcher 覆盖
+      nextTick(() => {
+        followUpAction.value = event.followUp ?? "none";
+      });
+      break;
+    case "mouseClick":
+    case "mouseDoubleClick":
+    case "mouseDown":
+    case "mouseUp":
+      operationObject.value = "mouse";
+      mouseOperation.value = event.kind;
+      selectedButton.value = event.button as MouseButton;
+      appendDelay.value = false;
+      break;
+    case "keyClick":
+    case "keyDown":
+    case "keyUp":
+      operationObject.value = "keyboard";
+      keyboardOperation.value = event.kind;
+      selectedKey.value = event.key ?? "";
+      appendDelay.value = false;
+      break;
+    case "delay":
+      operationObject.value = "delay";
+      delayMs.value = event.ms ?? 100;
+      appendDelay.value = false;
+      break;
+  }
 }
 
 function handleMouseDown(event: MouseEvent, index: number) {
@@ -387,6 +468,16 @@ function handleMouseDown(event: MouseEvent, index: number) {
 
       dragState = null;
       dropIndicatorIndex.value = null;
+    } else if (!hasMoved) {
+      const clickedEvent = events.value[index];
+      if (!clickedEvent) return;
+
+      if (selectedEventId.value === clickedEvent.id) {
+        selectedEventId.value = null;
+      } else {
+        selectedEventId.value = clickedEvent.id;
+        restoreEventToEditor(clickedEvent);
+      }
     }
   };
 
@@ -396,6 +487,9 @@ function handleMouseDown(event: MouseEvent, index: number) {
 
 function deleteEvent(eventId: number | null) {
   if (eventId === null) return;
+  if (selectedEventId.value === eventId) {
+    selectedEventId.value = null;
+  }
   events.value = events.value.filter((event) => event.id !== eventId);
   closeEventMenu();
 }
@@ -423,14 +517,14 @@ async function saveMacro() {
         request: {
           id: Number(editMacroId),
           name,
-          events: events.value.map(stripDraftId),
+          events: events.value.flatMap(stripDraftId),
         },
       });
     } else {
       newState = await invoke<MouseMacroState>("create_mouse_macro", {
         request: {
           name,
-          events: events.value.map(stripDraftId),
+          events: events.value.flatMap(stripDraftId),
         },
       });
     }
@@ -444,9 +538,42 @@ async function saveMacro() {
   }
 }
 
-function stripDraftId(event: DraftEvent): MouseMacroEvent {
-  const { id: _id, ...payload } = event;
-  return payload;
+function stripDraftId(event: DraftEvent): MouseMacroEvent[] {
+  if (event.kind === "mouseMove" && event.followUp) {
+    return [
+      { kind: "mouseMove", x: event.x, y: event.y } as MouseMacroEvent,
+      { kind: event.followUp, button: "left" } as MouseMacroEvent,
+    ];
+  }
+  const { id: _id, followUp: _followUp, ...rest } = event;
+  return [rest as unknown as MouseMacroEvent];
+}
+
+function mergeFollowUpEvents(rawEvents: MouseMacroEvent[]): DraftEvent[] {
+  const result: DraftEvent[] = [];
+  let i = 0;
+  while (i < rawEvents.length) {
+    const event = rawEvents[i];
+    const nextEvent = i + 1 < rawEvents.length ? rawEvents[i + 1] : null;
+    if (
+      event.kind === "mouseMove" &&
+      nextEvent &&
+      (nextEvent.kind === "mouseClick" || nextEvent.kind === "mouseDoubleClick")
+    ) {
+      result.push({
+        kind: "mouseMove",
+        x: event.x,
+        y: event.y,
+        followUp: nextEvent.kind,
+        id: nextEventId++,
+      } as DraftEvent);
+      i += 2;
+    } else {
+      result.push({ ...event, id: nextEventId++ } as DraftEvent);
+      i += 1;
+    }
+  }
+  return result;
 }
 
 async function toggleAlwaysOnTop() {
@@ -463,7 +590,10 @@ async function startWindowDrag() {
   await currentWindow.startDragging();
 }
 
-function eventAction(event: MouseMacroEvent) {
+function eventAction(event: DraftEvent) {
+  if (event.kind === "mouseMove" && event.followUp) {
+    return event.followUp === "mouseClick" ? "移动到 → 点击" : "移动到 → 双击";
+  }
   switch (event.kind) {
     case "mouseClick":
       return "鼠标单击";
@@ -486,7 +616,10 @@ function eventAction(event: MouseMacroEvent) {
   }
 }
 
-function eventTarget(event: MouseMacroEvent) {
+function eventTarget(event: DraftEvent) {
+  if (event.kind === "mouseMove" && event.followUp) {
+    return `x ${event.x}, y ${event.y}`;
+  }
   switch (event.kind) {
     case "mouseClick":
     case "mouseDoubleClick":
@@ -569,6 +702,7 @@ function buttonLabel(button: MouseButton) {
           <div v-if="dropIndicatorIndex === index" class="drop-indicator" />
           <div
             class="event-row"
+            :class="{ composite: event.followUp, selected: selectedEventId === event.id }"
             role="button"
             tabindex="0"
             @mousedown="handleMouseDown($event, index)"
@@ -668,6 +802,17 @@ function buttonLabel(button: MouseButton) {
             </div>
           </el-form-item>
 
+          <el-form-item
+            v-if="operationObject === 'mouse' && mouseOperation === 'mouseMove'"
+            label="后续操作"
+          >
+            <el-select v-model="followUpAction">
+              <el-option label="无" value="none" />
+              <el-option label="左键点击" value="mouseClick" />
+              <el-option label="左键双击" value="mouseDoubleClick" />
+            </el-select>
+          </el-form-item>
+
           <el-form-item v-if="operationObject === 'keyboard'" label="按键">
             <el-select v-model="selectedKey" filterable>
               <el-option
@@ -710,9 +855,20 @@ function buttonLabel(button: MouseButton) {
           <span :class="{ disabled: !appendDelay }">毫秒</span>
         </div>
 
-        <el-button type="primary" plain :icon="Plus" :disabled="!canAddEvent" @click="addEvent">
-          添加
-        </el-button>
+        <div class="action-buttons" :class="{ split: selectedEventId !== null }">
+          <el-button type="primary" plain :icon="Plus" :disabled="!canAddEvent" @click="addEvent">
+            添加
+          </el-button>
+          <el-button
+            v-if="selectedEventId !== null"
+            type="warning"
+            plain
+            :disabled="!canAddEvent"
+            @click="updateEvent"
+          >
+            变更
+          </el-button>
+        </div>
       </aside>
     </section>
 
@@ -833,7 +989,7 @@ function buttonLabel(button: MouseButton) {
 
 .macro-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 238px;
+  grid-template-columns: minmax(0, 1fr) 258px;
   gap: 10px;
   min-height: 0;
 }
@@ -853,7 +1009,7 @@ function buttonLabel(button: MouseButton) {
 
 .event-row {
   display: grid;
-  grid-template-columns: 64px 110px minmax(0, 1fr);
+  grid-template-columns: 64px minmax(110px, auto) minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   min-height: 40px;
@@ -882,6 +1038,7 @@ function buttonLabel(button: MouseButton) {
   color: var(--el-color-primary);
   font-size: 13px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .event-target {
@@ -1038,11 +1195,46 @@ function buttonLabel(button: MouseButton) {
   cursor: grabbing;
 }
 
+.event-row.selected {
+  border-color: var(--el-color-primary);
+  background: var(--el-fill-color-light);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-8);
+}
+
+.event-row.selected:hover {
+  border-color: var(--el-color-primary-dark-2);
+  background: var(--el-fill-color);
+}
+
+.event-row.composite {
+  border-left: 3px solid var(--el-color-primary);
+  padding-left: 7px;
+}
+
 .drop-indicator {
   height: 2px;
   background: var(--el-color-primary);
   border-radius: 1px;
   margin: 2px 0;
   pointer-events: none;
+}
+
+.action-buttons {
+  display: grid;
+  width: 100%;
+  gap: 8px;
+}
+
+.action-buttons:not(.split) {
+  grid-template-columns: 1fr;
+}
+
+.action-buttons.split {
+  grid-template-columns: 1fr 1fr;
+}
+
+/* 覆盖 Element Plus 相邻按钮默认的 12px 左间距，确保 grid 对齐 */
+.action-buttons :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 </style>
