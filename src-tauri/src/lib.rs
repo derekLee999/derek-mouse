@@ -17,7 +17,8 @@ use clicker::{ClickerConfig, ClickerRuntime};
 use config::{load_config, save_config, AppConfig};
 use input::{listen, ActiveFeature, Event, HotkeyConfig};
 use mouse_macro::{
-    CreateMacroRequest, MacroDetail, MouseMacroRuntime, UpdateMacroLoopPlaybackRequest,
+    CaptureImageResult, CreateMacroRequest, FindImageRegion, FindImageRequest, FindImageResult,
+    MacroDetail, MouseMacroRuntime, UpdateMacroLoopPlaybackRequest,
     UpdateMacroPlaybackSpeedRequest, UpdateMacroRequest,
 };
 use recorder::{
@@ -26,8 +27,7 @@ use recorder::{
 };
 use tauri::{Emitter, Manager};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN,
+    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 struct AppState {
@@ -92,8 +92,17 @@ struct GlobalHotkeyOptions {
 #[derive(Debug, serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct PickedCoordinate {
-    x: u32,
-    y: u32,
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PickedRegion {
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -127,8 +136,17 @@ struct CoordinatePickSnapshotPayload {
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FinishMouseCoordinatePickRequest {
-    x: u32,
-    y: u32,
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinishMouseRegionPickRequest {
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
 }
 
 #[tauri::command]
@@ -423,6 +441,41 @@ fn stop_mouse_macro(
 }
 
 #[tauri::command]
+fn test_mouse_macro_find_image(
+    request: FindImageRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<FindImageResult, String> {
+    state.mouse_macro.test_find_image(request)
+}
+
+#[tauri::command]
+fn capture_mouse_macro_region_image(
+    region: FindImageRegion,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<CaptureImageResult, String> {
+    state.mouse_macro.capture_region_image(region)
+}
+
+#[tauri::command]
+fn get_mouse_macro_screen_bounds() -> Result<CoordinatePickSnapshotMeta, String> {
+    let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+
+    if width <= 0 || height <= 0 {
+        return Err("Could not determine screen size".to_string());
+    }
+
+    Ok(CoordinatePickSnapshotMeta {
+        left,
+        top,
+        width: width as u32,
+        height: height as u32,
+    })
+}
+
+#[tauri::command]
 fn start_mouse_coordinate_pick(
     window_label: String,
     state: tauri::State<'_, Arc<AppState>>,
@@ -498,6 +551,32 @@ fn finish_mouse_coordinate_pick(
         PickedCoordinate {
             x: request.x,
             y: request.y,
+        },
+    )
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn finish_mouse_region_pick(
+    request: FinishMouseRegionPickRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let session = state
+        .coordinate_pick_session
+        .lock()
+        .map_err(|err| err.to_string())?
+        .take()
+        .ok_or_else(|| "Coordinate picker is not active".to_string())?;
+
+    app.emit_to(
+        session.target_label,
+        "mouse-region-picked",
+        PickedRegion {
+            x1: request.x1,
+            y1: request.y1,
+            x2: request.x2,
+            y2: request.y2,
         },
     )
     .map_err(|err| err.to_string())
@@ -641,9 +720,13 @@ pub fn run() {
             update_mouse_macro_loop_playback,
             play_mouse_macro,
             stop_mouse_macro,
+            test_mouse_macro_find_image,
+            capture_mouse_macro_region_image,
+            get_mouse_macro_screen_bounds,
             start_mouse_coordinate_pick,
             get_mouse_coordinate_pick_snapshot,
             finish_mouse_coordinate_pick,
+            finish_mouse_region_pick,
             cancel_mouse_coordinate_pick
         ])
         .run(tauri::generate_context!())

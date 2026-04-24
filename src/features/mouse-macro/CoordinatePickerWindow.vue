@@ -12,8 +12,10 @@ type ScreenBounds = {
 };
 
 const currentWindow = getCurrentWindow();
+const pickerMode = new URLSearchParams(window.location.search).get("mode") === "region" ? "region" : "coordinate";
 const screenBounds = ref<ScreenBounds | null>(null);
 const pointer = ref({ x: 0, y: 0 });
+const dragStart = ref<{ x: number; y: number } | null>(null);
 const viewport = ref({ width: window.innerWidth, height: window.innerHeight });
 const closing = ref(false);
 
@@ -21,8 +23,29 @@ const displayCoordinate = computed(() => {
   if (!screenBounds.value) return { x: 0, y: 0 };
 
   return {
-    x: Math.max(0, Math.round(screenBounds.value.left + pointer.value.x * scaleX())),
-    y: Math.max(0, Math.round(screenBounds.value.top + pointer.value.y * scaleY())),
+    x: Math.round(screenBounds.value.left + pointer.value.x * scaleX()),
+    y: Math.round(screenBounds.value.top + pointer.value.y * scaleY()),
+  };
+});
+
+const selectionRect = computed(() => {
+  if (!dragStart.value) return null;
+  const left = Math.min(dragStart.value.x, pointer.value.x);
+  const top = Math.min(dragStart.value.y, pointer.value.y);
+  const width = Math.abs(pointer.value.x - dragStart.value.x);
+  const height = Math.abs(pointer.value.y - dragStart.value.y);
+  return { left, top, width, height };
+});
+
+const displayRegion = computed(() => {
+  if (!screenBounds.value || !dragStart.value) return null;
+  const start = toScreenCoordinate(dragStart.value);
+  const end = toScreenCoordinate(pointer.value);
+  return {
+    x1: Math.min(start.x, end.x),
+    y1: Math.min(start.y, end.y),
+    x2: Math.max(start.x, end.x),
+    y2: Math.max(start.y, end.y),
   };
 });
 
@@ -54,6 +77,43 @@ function handlePointerMove(event: MouseEvent) {
   };
 }
 
+function handlePointerDown(event: MouseEvent) {
+  if (pickerMode !== "region" || event.button !== 0) return;
+  event.preventDefault();
+  pointer.value = {
+    x: event.clientX,
+    y: event.clientY,
+  };
+  dragStart.value = {
+    x: event.clientX,
+    y: event.clientY,
+  };
+}
+
+async function handlePointerUp(event: MouseEvent) {
+  if (pickerMode !== "region" || event.button !== 0 || !dragStart.value) return;
+  event.preventDefault();
+  pointer.value = {
+    x: event.clientX,
+    y: event.clientY,
+  };
+
+  if (!displayRegion.value) return;
+  const region = displayRegion.value;
+  if (Math.abs(region.x2 - region.x1) < 2 || Math.abs(region.y2 - region.y1) < 2) {
+    dragStart.value = null;
+    return;
+  }
+
+  closing.value = true;
+  await currentWindow.hide();
+  await waitForOverlayToDisappear();
+  await invoke("finish_mouse_region_pick", {
+    request: region,
+  });
+  await currentWindow.close();
+}
+
 function updateViewport() {
   viewport.value = {
     width: window.innerWidth,
@@ -62,6 +122,7 @@ function updateViewport() {
 }
 
 async function pickCoordinate(event: MouseEvent) {
+  if (pickerMode !== "coordinate") return;
   if (!screenBounds.value) return;
 
   pointer.value = {
@@ -98,20 +159,57 @@ function scaleX() {
 function scaleY() {
   return screenBounds.value ? screenBounds.value.height / Math.max(viewport.value.height, 1) : 1;
 }
+
+function toScreenCoordinate(point: { x: number; y: number }) {
+  if (!screenBounds.value) return { x: 0, y: 0 };
+  return {
+    x: Math.round(screenBounds.value.left + point.x * scaleX()),
+    y: Math.round(screenBounds.value.top + point.y * scaleY()),
+  };
+}
+
+function waitForOverlayToDisappear() {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, 90);
+  });
+}
 </script>
 
 <template>
-  <main class="coordinate-picker" @mousemove="handlePointerMove" @click="pickCoordinate" @contextmenu.prevent="closePicker(true)">
+  <main
+    class="coordinate-picker"
+    @mousemove="handlePointerMove"
+    @mousedown="handlePointerDown"
+    @mouseup="handlePointerUp"
+    @click="pickCoordinate"
+    @contextmenu.prevent="closePicker(true)"
+  >
     <div class="crosshair horizontal" :style="{ top: `${pointer.y}px` }" />
     <div class="crosshair vertical" :style="{ left: `${pointer.x}px` }" />
     <div
+      v-if="pickerMode === 'region' && selectionRect"
+      class="selection-box"
+      :style="{
+        left: `${selectionRect.left}px`,
+        top: `${selectionRect.top}px`,
+        width: `${selectionRect.width}px`,
+        height: `${selectionRect.height}px`,
+      }"
+    />
+    <div
       class="coordinate-badge"
       :style="{
-        left: `${Math.min(pointer.x + 14, viewport.width - 104)}px`,
+        left: `${Math.min(pointer.x + 14, viewport.width - 154)}px`,
         top: `${Math.min(pointer.y + 14, viewport.height - 34)}px`,
       }"
     >
-      {{ displayCoordinate.x }}, {{ displayCoordinate.y }}
+      <template v-if="pickerMode === 'region' && displayRegion">
+        {{ Math.abs(displayRegion.x2 - displayRegion.x1) }} x
+        {{ Math.abs(displayRegion.y2 - displayRegion.y1) }}
+      </template>
+      <template v-else>
+        {{ displayCoordinate.x }}, {{ displayCoordinate.y }}
+      </template>
     </div>
   </main>
 </template>
@@ -167,5 +265,16 @@ body,
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 6px;
   pointer-events: none;
+}
+
+.selection-box {
+  position: fixed;
+  z-index: 2;
+  pointer-events: none;
+  background: rgba(64, 158, 255, 0.16);
+  border: 1px solid #409EFF;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.45),
+    0 0 0 1px rgba(0, 0, 0, 0.35);
 }
 </style>

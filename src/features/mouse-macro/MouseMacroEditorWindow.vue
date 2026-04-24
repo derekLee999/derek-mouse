@@ -4,18 +4,20 @@ import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, TauriEvent, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Aim, Close, DocumentChecked, Plus, Top } from "@element-plus/icons-vue";
+import { Aim, Camera, Close, Delete, DocumentChecked, FolderOpened, Plus, Search, Top } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import {
   keyboardKeys,
   mouseButtonOptions,
   type MouseButton,
+  type MouseMacroFindImageAction,
+  type MouseMacroFindImageEvent,
   type MouseMacroEvent,
   type MouseMacroDetail,
   type MouseMacroState,
 } from "../../types";
 
-type OperationObject = "mouse" | "keyboard" | "delay";
+type OperationObject = "mouse" | "keyboard" | "delay" | "findImage";
 type MouseOperation = "mouseClick" | "mouseDoubleClick" | "mouseDown" | "mouseUp" | "mouseMove";
 type KeyboardOperation = "keyClick" | "keyDown" | "keyUp";
 
@@ -34,6 +36,30 @@ type CoordinatePickSnapshotMeta = {
   top: number;
   width: number;
   height: number;
+};
+
+type CoordinatePickMode = "move" | "find-region" | "template";
+
+type FindImageResult = {
+  found: boolean;
+  score: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type CaptureImageResult = {
+  dataUrl: string;
+  width: number;
+  height: number;
+};
+
+type PickedRegion = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
 };
 
 const currentWindow = getCurrentWindow();
@@ -55,9 +81,25 @@ const delayMs = ref(100);
 const moveX = ref(0);
 const moveY = ref(0);
 const pickingCoordinate = ref(false);
+const coordinatePickMode = ref<CoordinatePickMode | null>(null);
 const appendDelay = ref(false);
 const appendDelayMs = ref(100);
 const followUpAction = ref<"none" | "mouseClick" | "mouseDoubleClick">("none");
+const screenBounds = ref<CoordinatePickSnapshotMeta | null>(null);
+const findRegionMode = ref<"full" | "custom">("full");
+const findX1 = ref(0);
+const findY1 = ref(0);
+const findX2 = ref(0);
+const findY2 = ref(0);
+const findImageData = ref("");
+const findImageName = ref("");
+const findThreshold = ref(65);
+const findScale = ref(1);
+const findAction = ref<MouseMacroFindImageAction>("click");
+const findWaitUntilFound = ref(false);
+const findingTest = ref(false);
+const capturingTemplate = ref(false);
+const fileInputRef = ref<HTMLInputElement | null>(null);
 const selectedEventId = ref<number | null>(null);
 const eventMenu = ref<{
   visible: boolean;
@@ -75,6 +117,7 @@ const dropIndicatorIndex = ref<number | null>(null);
 
 let nextEventId = 1;
 let unlistenCoordinate: UnlistenFn | undefined;
+let unlistenRegion: UnlistenFn | undefined;
 
 type DragState = {
   index: number;
@@ -103,12 +146,26 @@ const operationObjectOptions = [
   { label: "鼠标操作", value: "mouse" },
   { label: "键盘操作", value: "keyboard" },
   { label: "延迟等待", value: "delay" },
+  { label: "找图", value: "findImage" },
 ] as const;
 
 const canSave = computed(() => macroName.value.trim().length > 0 && events.value.length > 0);
 const canAddEvent = computed(() => {
   if (operationObject.value === "delay") {
     return Number.isInteger(delayMs.value) && delayMs.value >= 5 && delayMs.value <= 60000;
+  }
+  if (operationObject.value === "findImage") {
+    return (
+      !!findImageData.value &&
+      findX1.value !== findX2.value &&
+      findY1.value !== findY2.value &&
+      Number.isFinite(findThreshold.value) &&
+      findThreshold.value >= 1 &&
+      findThreshold.value <= 100 &&
+      Number.isFinite(findScale.value) &&
+      findScale.value >= 0.1 &&
+      findScale.value <= 5
+    );
   }
   if (operationObject.value === "mouse" && mouseOperation.value === "mouseMove") {
     return Number.isInteger(moveX.value) && Number.isInteger(moveY.value) && moveX.value >= 0 && moveY.value >= 0;
@@ -118,6 +175,7 @@ const canAddEvent = computed(() => {
 
 onMounted(async () => {
   alwaysOnTop.value = await currentWindow.isAlwaysOnTop();
+  await loadScreenBounds();
 
   if (isEditMode) {
     try {
@@ -132,10 +190,12 @@ onMounted(async () => {
   }
 
   unlistenCoordinate = await listen<PickedCoordinate>("mouse-coordinate-picked", (event) => {
-    moveX.value = normalizeInteger(event.payload.x, 0, 0);
-    moveY.value = normalizeInteger(event.payload.y, 0, 0);
+    handlePickedCoordinate(event.payload);
     pickingCoordinate.value = false;
-    ElMessage.success("已获取坐标。");
+  });
+  unlistenRegion = await listen<PickedRegion>("mouse-region-picked", (event) => {
+    void handlePickedRegion(event.payload);
+    pickingCoordinate.value = false;
   });
   document.addEventListener("click", closeEventMenu);
   document.addEventListener("keydown", handleDocumentKeydown);
@@ -143,6 +203,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unlistenCoordinate?.();
+  unlistenRegion?.();
   if (pickingCoordinate.value) {
     void cancelCoordinatePick();
   }
@@ -157,6 +218,8 @@ watch(operationObject, (value) => {
     mouseOperation.value = "mouseClick";
   } else if (value === "keyboard") {
     keyboardOperation.value = "keyClick";
+  } else if (value === "findImage" && screenBounds.value && findRegionMode.value === "full") {
+    applyFullSearchRegion();
   }
 });
 
@@ -194,6 +257,41 @@ function normalizeInteger(value: number | undefined, fallback: number, min: numb
   return Math.min(Math.max(normalized, min), max ?? Number.MAX_SAFE_INTEGER);
 }
 
+async function loadScreenBounds() {
+  try {
+    screenBounds.value = await invoke<CoordinatePickSnapshotMeta>("get_mouse_macro_screen_bounds");
+    applyFullSearchRegion();
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+function applyFullSearchRegion() {
+  if (!screenBounds.value) return;
+  findRegionMode.value = "full";
+  findX1.value = screenBounds.value.left;
+  findY1.value = screenBounds.value.top;
+  findX2.value = screenBounds.value.left + screenBounds.value.width;
+  findY2.value = screenBounds.value.top + screenBounds.value.height;
+}
+
+function handleFindRegionNumberChange() {
+  findRegionMode.value = "custom";
+  findX1.value = normalizeInteger(findX1.value, 0, Number.MIN_SAFE_INTEGER);
+  findY1.value = normalizeInteger(findY1.value, 0, Number.MIN_SAFE_INTEGER);
+  findX2.value = normalizeInteger(findX2.value, 0, Number.MIN_SAFE_INTEGER);
+  findY2.value = normalizeInteger(findY2.value, 0, Number.MIN_SAFE_INTEGER);
+}
+
+function handleThresholdChange(value: number | undefined) {
+  findThreshold.value = normalizeInteger(value, 65, 1, 100);
+}
+
+function handleScaleChange(value: number | undefined) {
+  const normalized = typeof value === "number" && Number.isFinite(value) ? value : 1;
+  findScale.value = Math.min(Math.max(Math.round(normalized * 100) / 100, 0.1), 5);
+}
+
 function handleDelayChange(value: number | undefined) {
   delayMs.value = normalizeInteger(value, 100, 5, 60000);
 }
@@ -206,7 +304,7 @@ function handleMoveYChange(value: number | undefined) {
   moveY.value = normalizeInteger(value, 0, 0);
 }
 
-async function startCoordinatePick() {
+async function startCoordinatePick(mode: CoordinatePickMode = "move") {
   if (pickingCoordinate.value) {
     await cancelCoordinatePick();
     return;
@@ -214,6 +312,7 @@ async function startCoordinatePick() {
 
   closeEventMenu();
   pickingCoordinate.value = true;
+  coordinatePickMode.value = mode;
   try {
     const snapshot = await invoke<CoordinatePickSnapshotMeta>("start_mouse_coordinate_pick", {
       windowLabel: currentWindow.label,
@@ -221,7 +320,7 @@ async function startCoordinatePick() {
 
     const label = `coordinate-picker-${Date.now()}`;
     const picker = new WebviewWindow(label, {
-      url: "/index.html?view=coordinate-picker",
+      url: `/index.html?view=coordinate-picker&mode=${mode === "move" ? "coordinate" : "region"}`,
       title: "选择坐标",
       x: snapshot.left,
       y: snapshot.top,
@@ -238,6 +337,12 @@ async function startCoordinatePick() {
 
     picker.once(TauriEvent.WINDOW_DESTROYED, () => {
       pickingCoordinate.value = false;
+      if (coordinatePickMode.value === mode) {
+        coordinatePickMode.value = null;
+      }
+      if (mode === "template") {
+        capturingTemplate.value = false;
+      }
     });
     picker.once("tauri://error", async (event) => {
       pickingCoordinate.value = false;
@@ -246,15 +351,60 @@ async function startCoordinatePick() {
     });
   } catch (error) {
     pickingCoordinate.value = false;
+    coordinatePickMode.value = null;
+    if (mode === "template") {
+      capturingTemplate.value = false;
+    }
     ElMessage.error(String(error));
   }
 }
 
 async function cancelCoordinatePick() {
   pickingCoordinate.value = false;
+  coordinatePickMode.value = null;
+  capturingTemplate.value = false;
   try {
     await invoke("cancel_mouse_coordinate_pick");
   } catch {}
+}
+
+function handlePickedCoordinate(coordinate: PickedCoordinate) {
+  moveX.value = normalizeInteger(coordinate.x, 0, 0);
+  moveY.value = normalizeInteger(coordinate.y, 0, 0);
+  coordinatePickMode.value = null;
+  ElMessage.success("已获取坐标。");
+}
+
+async function handlePickedRegion(region: PickedRegion) {
+  const mode = coordinatePickMode.value;
+  coordinatePickMode.value = null;
+
+  if (mode === "find-region") {
+    findRegionMode.value = "custom";
+    findX1.value = Math.min(region.x1, region.x2);
+    findY1.value = Math.min(region.y1, region.y2);
+    findX2.value = Math.max(region.x1, region.x2);
+    findY2.value = Math.max(region.y1, region.y2);
+    ElMessage.success("已选取找图区域。");
+    return;
+  }
+
+  if (mode === "template") {
+    await captureFindTemplateRegion({
+      x1: Math.min(region.x1, region.x2),
+      y1: Math.min(region.y1, region.y2),
+      x2: Math.max(region.x1, region.x2),
+      y2: Math.max(region.y1, region.y2),
+    });
+  }
+}
+
+function startFindRegionPick() {
+  if (pickingCoordinate.value) {
+    void cancelCoordinatePick();
+    return;
+  }
+  void startCoordinatePick("find-region");
 }
 
 function addEvent() {
@@ -296,6 +446,10 @@ function buildEvent(): MouseMacroEvent {
     return { kind: "delay", ms: normalizeInteger(delayMs.value, 100, 5, 60000) };
   }
 
+  if (operationObject.value === "findImage") {
+    return buildFindImageEvent();
+  }
+
   if (operationObject.value === "keyboard") {
     return { kind: keyboardOperation.value, key: selectedKey.value };
   }
@@ -309,6 +463,106 @@ function buildEvent(): MouseMacroEvent {
   }
 
   return { kind: mouseOperation.value, button: selectedButton.value };
+}
+
+function buildFindImageEvent(): MouseMacroFindImageEvent {
+  return {
+    kind: "findImage",
+    region: {
+      x1: normalizeInteger(findX1.value, 0, Number.MIN_SAFE_INTEGER),
+      y1: normalizeInteger(findY1.value, 0, Number.MIN_SAFE_INTEGER),
+      x2: normalizeInteger(findX2.value, 0, Number.MIN_SAFE_INTEGER),
+      y2: normalizeInteger(findY2.value, 0, Number.MIN_SAFE_INTEGER),
+    },
+    imageData: findImageData.value,
+    threshold: Math.min(Math.max(Math.round(findThreshold.value * 10) / 10, 1), 100),
+    scale: Math.min(Math.max(Math.round(findScale.value * 100) / 100, 0.1), 5),
+    action: findAction.value,
+    waitUntilFound: findWaitUntilFound.value,
+  };
+}
+
+async function captureFindTemplate() {
+  if (pickingCoordinate.value) {
+    await cancelCoordinatePick();
+    return;
+  }
+
+  capturingTemplate.value = true;
+  void startCoordinatePick("template");
+}
+
+async function captureFindTemplateRegion(region: PickedRegion) {
+  capturingTemplate.value = true;
+  try {
+    const image = await invoke<CaptureImageResult>("capture_mouse_macro_region_image", {
+      region,
+    });
+    findImageData.value = image.dataUrl;
+    findImageName.value = `屏幕截图 ${image.width}x${image.height}`;
+    ElMessage.success("已截取模板图。");
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    capturingTemplate.value = false;
+  }
+}
+
+function openLocalImagePicker() {
+  fileInputRef.value?.click();
+}
+
+function handleLocalImageChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+
+  if (!file.type.startsWith("image/")) {
+    ElMessage.warning("请选择图片文件。");
+    input.value = "";
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    findImageData.value = String(reader.result ?? "");
+    findImageName.value = file.name;
+    input.value = "";
+  };
+  reader.onerror = () => {
+    ElMessage.error("读取图片失败。");
+    input.value = "";
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearFindImage() {
+  findImageData.value = "";
+  findImageName.value = "";
+}
+
+async function testFindImage() {
+  if (!canAddEvent.value || operationObject.value !== "findImage") {
+    ElMessage.warning("请先补全找图配置。");
+    return;
+  }
+
+  findingTest.value = true;
+  try {
+    const result = await invoke<FindImageResult>("test_mouse_macro_find_image", {
+      request: buildFindImageEvent(),
+    });
+    const score = result.score.toFixed(1);
+    if (result.found) {
+      ElMessage.success(`匹配成功：${score}%，坐标 ${result.x}, ${result.y}`);
+    } else {
+      ElMessage.warning(`未达到阈值，最高匹配 ${score}%。`);
+    }
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    findingTest.value = false;
+  }
 }
 
 function updateEvent() {
@@ -388,6 +642,21 @@ function restoreEventToEditor(event: DraftEvent) {
     case "delay":
       operationObject.value = "delay";
       delayMs.value = event.ms ?? 100;
+      appendDelay.value = false;
+      break;
+    case "findImage":
+      operationObject.value = "findImage";
+      findRegionMode.value = "custom";
+      findX1.value = event.region.x1;
+      findY1.value = event.region.y1;
+      findX2.value = event.region.x2;
+      findY2.value = event.region.y2;
+      findImageData.value = event.imageData;
+      findImageName.value = "已保存的模板图";
+      findThreshold.value = event.threshold;
+      findScale.value = event.scale;
+      findAction.value = event.action;
+      findWaitUntilFound.value = event.waitUntilFound;
       appendDelay.value = false;
       break;
   }
@@ -613,6 +882,8 @@ function eventAction(event: DraftEvent) {
       return "键盘释放";
     case "delay":
       return "延迟等待";
+    case "findImage":
+      return "找图";
   }
 }
 
@@ -634,6 +905,8 @@ function eventTarget(event: DraftEvent) {
       return event.key;
     case "delay":
       return `${event.ms} ms`;
+    case "findImage":
+      return `${event.threshold}% · ${event.action === "click" ? "点击" : "移动到"}`;
   }
 }
 
@@ -773,7 +1046,7 @@ function buttonLabel(button: MouseButton) {
                     :class="{ active: pickingCoordinate }"
                     type="button"
                     aria-label="取坐标"
-                    @click.stop.prevent="startCoordinatePick"
+                    @click.stop.prevent="startCoordinatePick()"
                   >
                     <el-icon><Aim /></el-icon>
                   </button>
@@ -838,9 +1111,139 @@ function buttonLabel(button: MouseButton) {
               <span>毫秒</span>
             </div>
           </el-form-item>
+
+          <template v-if="operationObject === 'findImage'">
+            <el-form-item label="找图区域">
+              <div class="find-region-tools">
+                <el-button size="small" :disabled="!screenBounds" @click="applyFullSearchRegion">
+                  全图
+                </el-button>
+                <el-button size="small" :icon="Aim" @click="startFindRegionPick">
+                  选取区域
+                </el-button>
+              </div>
+              <div class="find-coordinate-grid">
+                <span>X1</span>
+                <el-input-number
+                  v-model="findX1"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  @change="handleFindRegionNumberChange"
+                />
+                <span>Y1</span>
+                <el-input-number
+                  v-model="findY1"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  @change="handleFindRegionNumberChange"
+                />
+                <span>X2</span>
+                <el-input-number
+                  v-model="findX2"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  @change="handleFindRegionNumberChange"
+                />
+                <span>Y2</span>
+                <el-input-number
+                  v-model="findY2"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  @change="handleFindRegionNumberChange"
+                />
+              </div>
+            </el-form-item>
+
+            <el-form-item label="要查找的图">
+              <div class="find-image-box">
+                <div class="find-preview">
+                  <img v-if="findImageData" :src="findImageData" alt="" />
+                  <span v-else>无图片</span>
+                </div>
+                <div class="find-image-actions">
+                  <el-button
+                    size="small"
+                    :icon="Search"
+                    :loading="findingTest"
+                    :disabled="!findImageData"
+                    @click="testFindImage"
+                  >
+                    测试
+                  </el-button>
+                  <el-button
+                    size="small"
+                    :icon="Camera"
+                    :loading="capturingTemplate"
+                    @click="captureFindTemplate"
+                  >
+                    屏幕截图
+                  </el-button>
+                  <el-button size="small" :icon="FolderOpened" @click="openLocalImagePicker">
+                    本地图片
+                  </el-button>
+                  <el-button size="small" :icon="Delete" :disabled="!findImageData" @click="clearFindImage">
+                    清除图片
+                  </el-button>
+                </div>
+              </div>
+              <input
+                ref="fileInputRef"
+                class="file-input"
+                type="file"
+                accept="image/*"
+                @change="handleLocalImageChange"
+              />
+              <span v-if="findImageName" class="find-image-name">{{ findImageName }}</span>
+            </el-form-item>
+
+            <el-form-item label="匹配度大于" class="inline-find-field">
+              <div class="threshold-row">
+                <el-input-number
+                  v-model="findThreshold"
+                  :min="1"
+                  :max="100"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  @change="handleThresholdChange"
+                />
+                <span>%</span>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="缩放" class="inline-find-field">
+              <div class="threshold-row">
+                <el-input-number
+                  v-model="findScale"
+                  :min="0.1"
+                  :max="5"
+                  :step="0.1"
+                  :precision="2"
+                  controls-position="right"
+                  @change="handleScaleChange"
+                />
+                <span>倍</span>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="后续操作" class="inline-find-field">
+              <el-select v-model="findAction">
+                <el-option label="点击" value="click" />
+                <el-option label="移动到" value="move" />
+              </el-select>
+            </el-form-item>
+
+            <el-checkbox v-model="findWaitUntilFound" class="wait-until-found">
+              直到找到为止
+            </el-checkbox>
+          </template>
         </el-form>
 
-        <div v-if="operationObject !== 'delay'" class="append-delay-row">
+        <div v-if="operationObject !== 'delay' && operationObject !== 'findImage'" class="append-delay-row">
           <el-checkbox v-model="appendDelay" size="small">添加延迟</el-checkbox>
           <el-input-number
             v-model="appendDelayMs"
@@ -1056,6 +1459,7 @@ function buttonLabel(button: MouseButton) {
   gap: 10px;
   min-height: 0;
   padding: 12px;
+  overflow: hidden;
   background: var(--el-bg-color);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
@@ -1064,6 +1468,28 @@ function buttonLabel(button: MouseButton) {
 .operation-form {
   display: grid;
   gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
+}
+
+.operation-form::-webkit-scrollbar {
+  width: 6px;
+}
+
+.operation-form::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.operation-form::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+
+.operation-form:hover::-webkit-scrollbar-thumb,
+.operation-form:active::-webkit-scrollbar-thumb {
+  background: var(--el-text-color-placeholder);
 }
 
 .operation-form :deep(.el-form-item) {
@@ -1128,8 +1554,128 @@ function buttonLabel(button: MouseButton) {
   white-space: nowrap;
 }
 
+.find-region-tools {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.find-region-tools :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.find-coordinate-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px 6px;
+  align-items: center;
+}
+
+.find-coordinate-grid span,
+.threshold-row span {
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.find-image-box {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+}
+
+.find-preview {
+  display: grid;
+  width: 96px;
+  height: 96px;
+  place-items: center;
+  overflow: hidden;
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+
+.find-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.find-image-actions {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.find-image-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.file-input {
+  display: none;
+}
+
+.find-image-name {
+  display: block;
+  max-width: 100%;
+  margin-top: 6px;
+  overflow: hidden;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.threshold-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.inline-find-field {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.inline-find-field :deep(.el-form-item__label) {
+  justify-content: flex-start;
+  min-width: 0;
+  padding-bottom: 0;
+  overflow: hidden;
+  line-height: 32px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-find-field :deep(.el-form-item__content) {
+  min-width: 0;
+}
+
+.inline-find-field .threshold-row {
+  grid-template-columns: minmax(88px, 118px) auto;
+  width: 100%;
+}
+
+.inline-find-field :deep(.el-select) {
+  width: 100%;
+}
+
+.wait-until-found {
+  width: fit-content;
+}
+
 .append-delay-row {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -1221,6 +1767,7 @@ function buttonLabel(button: MouseButton) {
 
 .action-buttons {
   display: grid;
+  flex: 0 0 auto;
   width: 100%;
   gap: 8px;
 }

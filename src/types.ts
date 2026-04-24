@@ -72,7 +72,27 @@ export type MouseMacroEvent =
   | { kind: "keyClick"; key: string }
   | { kind: "keyDown"; key: string }
   | { kind: "keyUp"; key: string }
-  | { kind: "delay"; ms: number };
+  | { kind: "delay"; ms: number }
+  | MouseMacroFindImageEvent;
+
+export type MouseMacroFindImageAction = "click" | "move";
+
+export type MouseMacroFindImageRegion = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+};
+
+export type MouseMacroFindImageEvent = {
+  kind: "findImage";
+  region: MouseMacroFindImageRegion;
+  imageData: string;
+  threshold: number;
+  scale: number;
+  action: MouseMacroFindImageAction;
+  waitUntilFound: boolean;
+};
 
 export type MouseMacroSummary = {
   id: number;
