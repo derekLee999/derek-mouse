@@ -9,10 +9,14 @@ import {
   keyNeedsModifier,
 } from "../types";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   modelValue: HotkeyConfig;
   disabled?: boolean;
-}>();
+  variant?: "bar" | "popover";
+}>(), {
+  disabled: false,
+  variant: "bar",
+});
 
 const emit = defineEmits<{
   "update:modelValue": [value: HotkeyConfig];
@@ -30,6 +34,10 @@ const autoCtrl = ref(false);
 
 const selectedKeyNeedsModifier = computed(() => keyNeedsModifier(hotkey.key));
 const displayHotkey = computed(() => hotkeyText(hotkey));
+const isPopover = computed(() => props.variant === "popover");
+const hotkeyKeyOptions = computed(() =>
+  keyboardKeys.filter((key) => !["SPACE", "ENTER", "ESC"].includes(key)),
+);
 
 onMounted(async () => {
   try {
@@ -138,8 +146,16 @@ function sameHotkey(left: HotkeyConfig, right: HotkeyConfig) {
 </script>
 
 <template>
-  <section class="global-hotkey-bar">
-    <strong class="hotkey-label">全局热键</strong>
+  <section class="global-hotkey-bar" :class="{ popover: isPopover, disabled: props.disabled }">
+    <div class="hotkey-head">
+      <div class="hotkey-title-block">
+        <strong class="hotkey-label">全局启停热键</strong>
+        <span v-if="isPopover" class="hotkey-hint">
+          用于启停鼠标连点、键鼠录制回放、鼠标宏回放
+        </span>
+      </div>
+      <span class="hotkey-value">{{ displayHotkey }}</span>
+    </div>
 
     <div class="hotkey-controls">
       <el-checkbox
@@ -166,7 +182,7 @@ function sameHotkey(left: HotkeyConfig, right: HotkeyConfig) {
         @change="handleKeyChange"
       >
         <el-option
-          v-for="key in keyboardKeys"
+          v-for="key in hotkeyKeyOptions"
           :key="key"
           :label="key"
           :value="key"
@@ -174,8 +190,9 @@ function sameHotkey(left: HotkeyConfig, right: HotkeyConfig) {
       </el-select>
     </div>
 
-    <span class="hotkey-value">{{ displayHotkey }}</span>
-
+    <span v-if="isPopover && props.disabled" class="hotkey-disabled-hint">
+      键鼠录制忙碌时暂不可修改
+    </span>
   </section>
 </template>
 
@@ -195,10 +212,41 @@ function sameHotkey(left: HotkeyConfig, right: HotkeyConfig) {
   border-radius: 8px;
 }
 
+.global-hotkey-bar.popover {
+  flex-direction: column;
+  align-items: stretch;
+  max-width: none;
+  min-height: auto;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+.hotkey-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hotkey-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
 .hotkey-label {
   color: var(--el-text-color-regular);
   font-size: 13px;
   font-weight: 600;
+}
+
+.hotkey-hint {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .hotkey-value {
@@ -206,12 +254,22 @@ function sameHotkey(left: HotkeyConfig, right: HotkeyConfig) {
   font-size: 14px;
   font-weight: 700;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .hotkey-controls {
   display: flex;
   gap: 10px;
   align-items: center;
+}
+
+.global-hotkey-bar.popover .hotkey-controls {
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
 }
 
 .hotkey-controls :deep(.el-checkbox) {
@@ -222,10 +280,25 @@ function sameHotkey(left: HotkeyConfig, right: HotkeyConfig) {
   width: 80px;
 }
 
+.global-hotkey-bar.popover .hotkey-controls :deep(.el-select) {
+  flex: 1;
+  min-width: 110px;
+}
+
+.hotkey-disabled-hint {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
 @media (max-width: 720px) {
   .global-hotkey-bar {
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+
+  .hotkey-head {
+    flex-direction: column;
+    gap: 6px;
   }
 }
 </style>

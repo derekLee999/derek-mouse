@@ -570,7 +570,6 @@ impl RecorderRuntime {
                     if let Ok(state) =
                         self.toggle_selected_playback(app.clone(), show_window_on_playback_stop)
                     {
-                        tray::notify_global_hotkey_state(app, !was_playing);
                         if was_playing && show_window_on_playback_stop {
                             show_main_window(app);
                         }

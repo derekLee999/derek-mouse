@@ -309,7 +309,6 @@ impl ClickerRuntime {
         } else {
             TrayStatus::Stopped
         });
-        tray::notify_global_hotkey_state(app, next_running);
         if was_running && show_window_on_stop {
             show_main_window(app);
         }

@@ -1,11 +1,4 @@
-use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
-    },
-    thread,
-    time::Duration,
-};
+use std::sync::{Mutex, OnceLock};
 
 use tauri::{
     image::Image,
@@ -13,7 +6,6 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
-use tauri_plugin_notification::NotificationExt;
 
 const QUIT_MENU_ID: &str = "quit";
 
@@ -35,7 +27,6 @@ struct TrayIcons {
 static TRAY: OnceLock<Mutex<Option<TrayIcon>>> = OnceLock::new();
 static TRAY_STATUS: OnceLock<Mutex<Option<TrayStatus>>> = OnceLock::new();
 static TRAY_ICONS: OnceLock<TrayIcons> = OnceLock::new();
-static NOTIFICATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn init(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, QUIT_MENU_ID, "退出程序", true, None::<&str>)?;
@@ -108,30 +99,6 @@ pub fn set_status(status: TrayStatus) {
     }
 }
 
-pub fn notify_global_hotkey_state(app: &AppHandle, started: bool) {
-    let sequence = NOTIFICATION_SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1;
-    let app = app.clone();
-
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(1200));
-        if NOTIFICATION_SEQUENCE.load(Ordering::SeqCst) != sequence {
-            return;
-        }
-
-        show_global_hotkey_notification(&app, started);
-    });
-}
-
-fn show_global_hotkey_notification(app: &AppHandle, started: bool) {
-    let _ = app
-        .notification()
-        .builder()
-        .title("鼠标连点器")
-        .body(if started { "已启动" } else { "已停止" })
-        .icon(notification_icon_path())
-        .show();
-}
-
 fn icon_for(status: TrayStatus) -> tauri::Result<Image<'static>> {
     let icons = tray_icons()?;
 
@@ -168,8 +135,4 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
-}
-
-fn notification_icon_path() -> String {
-    format!(r"{}\icons\icon.ico", env!("CARGO_MANIFEST_DIR"))
 }

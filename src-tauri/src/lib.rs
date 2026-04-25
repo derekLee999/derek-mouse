@@ -775,7 +775,6 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             tray::init(&app_handle)?;

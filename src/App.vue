@@ -1,16 +1,15 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { KnifeFork, Mouse, VideoCamera } from "@element-plus/icons-vue";
 import TitleBar from "./components/TitleBar.vue";
-import GlobalHotkeyBar from "./components/GlobalHotkeyBar.vue";
 import ClickerPanel from "./features/clicker/ClickerPanel.vue";
 import CoordinatePickerWindow from "./features/mouse-macro/CoordinatePickerWindow.vue";
 import MouseMacroEditorWindow from "./features/mouse-macro/MouseMacroEditorWindow.vue";
 import MouseMacroPanel from "./features/mouse-macro/MouseMacroPanel.vue";
 import RecordingEditorWindow from "./features/recorder/RecordingEditorWindow.vue";
 import RecorderPanel from "./features/recorder/RecorderPanel.vue";
-import type { HotkeyConfig } from "./types";
+import { hotkeyText, type HotkeyConfig } from "./types";
 
 type ActiveTab = "clicker" | "recorder" | "mouse-macro";
 
@@ -26,6 +25,7 @@ const globalHotkey = ref<HotkeyConfig>({
   alt: false,
   key: "F8",
 });
+const displayGlobalHotkey = computed(() => hotkeyText(globalHotkey.value));
 
 watch(
   activeTab,
@@ -63,43 +63,48 @@ function handleWindowKeydown(event: KeyboardEvent) {
   <MouseMacroEditorWindow v-else-if="isMouseMacroEditor" />
   <CoordinatePickerWindow v-else-if="isCoordinatePicker" />
   <main v-else class="app-shell">
-    <TitleBar />
-    <GlobalHotkeyBar v-model="globalHotkey" :disabled="activeTab === 'recorder' && recorderBusy" />
+    <TitleBar v-model="globalHotkey" :hotkey-disabled="activeTab === 'recorder' && recorderBusy" />
 
-    <el-tabs v-model="activeTab" class="workspace-tabs">
-      <el-tab-pane name="clicker">
-        <template #label>
-          <span class="tab-label">
-            <el-icon><Mouse /></el-icon>
-            鼠标连点
-          </span>
-        </template>
+    <section class="workspace-tabs-shell">
+      <el-tabs v-model="activeTab" class="workspace-tabs">
+        <el-tab-pane name="clicker">
+          <template #label>
+            <span class="tab-label">
+              <el-icon><Mouse /></el-icon>
+              鼠标连点
+            </span>
+          </template>
 
-        <ClickerPanel :hotkey="globalHotkey" />
-      </el-tab-pane>
+          <ClickerPanel :hotkey="globalHotkey" />
+        </el-tab-pane>
 
-      <el-tab-pane name="recorder">
-        <template #label>
-          <span class="tab-label">
-            <el-icon><VideoCamera /></el-icon>
-            键鼠录制
-          </span>
-        </template>
+        <el-tab-pane name="recorder">
+          <template #label>
+            <span class="tab-label">
+              <el-icon><VideoCamera /></el-icon>
+              键鼠录制
+            </span>
+          </template>
 
-        <RecorderPanel :hotkey="globalHotkey" @busy-change="recorderBusy = $event" />
-      </el-tab-pane>
+          <RecorderPanel :hotkey="globalHotkey" @busy-change="recorderBusy = $event" />
+        </el-tab-pane>
 
-      <el-tab-pane name="mouse-macro">
-        <template #label>
-          <span class="tab-label">
-            <el-icon><KnifeFork /></el-icon>
-            鼠标宏
-          </span>
-        </template>
+        <el-tab-pane name="mouse-macro">
+          <template #label>
+            <span class="tab-label">
+              <el-icon><KnifeFork /></el-icon>
+              鼠标宏
+            </span>
+          </template>
 
-        <MouseMacroPanel />
-      </el-tab-pane>
-    </el-tabs>
+          <MouseMacroPanel />
+        </el-tab-pane>
+      </el-tabs>
+      <div class="workspace-hotkey-indicator" aria-label="当前全局热键">
+        <span class="workspace-hotkey-label">热键</span>
+        <span class="workspace-hotkey-value">{{ displayGlobalHotkey }}</span>
+      </div>
+    </section>
   </main>
 </template>
 
@@ -140,9 +145,14 @@ input {
 <style scoped>
 .app-shell {
   display: grid;
-  grid-template-rows: 36px auto minmax(0, 1fr);
+  grid-template-rows: 36px minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
+}
+
+.workspace-tabs-shell {
+  position: relative;
+  min-height: 0;
 }
 
 .workspace-tabs {
@@ -162,6 +172,10 @@ input {
   margin-bottom: 10px;
 }
 
+.workspace-tabs :deep(.el-tabs__nav-wrap) {
+  padding-right: 148px;
+}
+
 .workspace-tabs :deep(.el-tabs__content) {
   height: calc(100% - 44px);
 }
@@ -174,5 +188,56 @@ input {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.workspace-hotkey-indicator {
+  position: absolute;
+  top: 24px;
+  right: calc(50% - 540px + 24px);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  color: var(--el-text-color-regular);
+  background: color-mix(in srgb, var(--el-fill-color-light) 80%, transparent);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 999px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.workspace-hotkey-label {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.workspace-hotkey-value {
+  color: var(--el-text-color-primary);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+@media (max-width: 1120px) {
+  .workspace-hotkey-indicator {
+    right: 24px;
+  }
+}
+
+@media (max-width: 720px) {
+  .workspace-tabs :deep(.el-tabs__nav-wrap) {
+    padding-right: 116px;
+  }
+
+  .workspace-hotkey-indicator {
+    gap: 6px;
+    padding: 4px 8px;
+  }
+
+  .workspace-hotkey-label,
+  .workspace-hotkey-value {
+    font-size: 11px;
+  }
 }
 </style>

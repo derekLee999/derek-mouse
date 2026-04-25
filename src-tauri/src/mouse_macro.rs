@@ -516,12 +516,7 @@ impl MouseMacroRuntime {
 
     pub fn test_find_text(&self, request: FindTextRequest) -> Result<FindTextResult, String> {
         validate_find_text_request(&request)?;
-        let mut engine = self.ocr_engine.lock().map_err(|e| e.to_string())?;
-        if engine.is_none() {
-            *engine = Some(OcrEngine::new()?);
-        }
-        let engine = engine.as_ref().unwrap();
-        find_text_once(&request, engine)
+        find_text_once_with_recovery(&request, &self.ocr_engine)
     }
 
     pub fn capture_region_image(
@@ -994,13 +989,7 @@ fn play_find_text_event(
     validate_find_text_request(&request)?;
 
     loop {
-        let mut engine = ocr_engine.lock().map_err(|e| e.to_string())?;
-        if engine.is_none() {
-            *engine = Some(OcrEngine::new()?);
-        }
-        let engine = engine.as_ref().unwrap();
-
-        let result = find_text_once(&request, engine)?;
+        let result = find_text_once_with_recovery(&request, ocr_engine)?;
 
         if result.found {
             let target_x = result.x + request.offset_x;
@@ -1027,6 +1016,44 @@ fn play_find_text_event(
 
         sleep_adjusted(500, speed);
     }
+}
+
+fn find_text_once_with_recovery(
+    request: &FindTextRequest,
+    ocr_engine: &std::sync::Mutex<Option<OcrEngine>>,
+) -> Result<FindTextResult, String> {
+    let mut has_retried = false;
+
+    loop {
+        let result = {
+            let mut engine = ocr_engine.lock().map_err(|e| e.to_string())?;
+            if engine.is_none() {
+                *engine = Some(OcrEngine::new()?);
+            }
+            let engine = engine.as_ref().unwrap();
+            find_text_once(request, engine)
+        };
+
+        match result {
+            Ok(result) => return Ok(result),
+            Err(error) if !has_retried && should_restart_ocr_engine(&error) => {
+                has_retried = true;
+                let mut engine = ocr_engine.lock().map_err(|e| e.to_string())?;
+                *engine = None;
+                *engine = Some(OcrEngine::new()?);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn should_restart_ocr_engine(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("could not send data to ocr engine")
+        || normalized.contains("could not flush ocr stdin")
+        || normalized.contains("ocr channel closed")
+        || normalized.contains("broken pipe")
+        || normalized.contains("os error 232")
 }
 
 fn find_text_once(

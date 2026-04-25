@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, TauriEvent, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Aim, Camera, Close, Delete, DocumentChecked, FolderOpened, Plus, Search, Top } from "@element-plus/icons-vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import {
   keyboardKeys,
   mouseButtonOptions,
@@ -351,6 +351,10 @@ function saveWindowSize(size: SavedWindowSize) {
   localStorage.setItem(MOUSE_MACRO_EDITOR_WINDOW_SIZE_KEY, JSON.stringify(size));
 }
 
+function formatElapsedSeconds(elapsedMs: number) {
+  return (elapsedMs / 1000).toFixed(2);
+}
+
 async function persistCurrentWindowSize() {
   const [size, scaleFactor] = await Promise.all([currentWindow.innerSize(), currentWindow.scaleFactor()]);
   const logicalSize = size.toLogical(scaleFactor);
@@ -471,13 +475,27 @@ async function testFindText() {
 
   findingTextTest.value = true;
   try {
+    const startedAt = performance.now();
     const result = await invoke<FindTextResult>("test_mouse_macro_find_text", {
       request: buildFindTextEvent(),
     });
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    const elapsedSeconds = formatElapsedSeconds(elapsedMs);
     if (result.found) {
-      ElMessage.success(`找到文字，坐标 ${result.x}, ${result.y}`);
+      await ElMessageBox.alert(
+        h("div", { class: "find-text-test-result" }, [
+          h("p", null, `识别文字：${result.text}`),
+          h("p", null, `坐标：${result.x}, ${result.y}`),
+          h("p", null, `用时：${elapsedSeconds} 秒`),
+        ]),
+        "文字识别测试成功",
+        {
+          confirmButtonText: "确定",
+          type: "success",
+        },
+      ).catch(() => undefined);
     } else {
-      ElMessage.warning("未在区域内找到指定文字。");
+      ElMessage.warning(`未在区域内找到指定文字，用时 ${elapsedSeconds} 秒。`);
     }
   } catch (error) {
     ElMessage.error(String(error));
@@ -1345,7 +1363,15 @@ function buttonLabel(button: MouseButton) {
 
       <aside class="operation-panel">
         <el-form label-position="top" class="operation-form">
-          <el-form-item label="操作对象">
+          <el-form-item>
+            <template #label>
+              <span class="operation-object-label">
+                <span>操作对象</span>
+                <span v-if="operationObject === 'findText'" class="operation-object-hint">
+                  若非必要请使用找图
+                </span>
+              </span>
+            </template>
             <el-select v-model="operationObject">
               <el-option
                 v-for="option in operationObjectOptions"
@@ -1605,7 +1631,7 @@ function buttonLabel(button: MouseButton) {
             </el-form-item>
 
             <el-checkbox v-model="findWaitUntilFound" class="wait-until-found">
-              直到找到为止
+              直到找到为止(一般不勾选)
             </el-checkbox>
           </template>
 
@@ -1728,7 +1754,7 @@ function buttonLabel(button: MouseButton) {
             </el-form-item>
 
             <el-checkbox v-model="findColorWaitUntilFound" class="wait-until-found">
-              直到找到为止
+              直到找到为止(一般不勾选)
             </el-checkbox>
 
             <el-button
@@ -1851,7 +1877,7 @@ function buttonLabel(button: MouseButton) {
             </el-form-item>
 
             <el-checkbox v-model="findTextWaitUntilFound" class="wait-until-found">
-              直到找到为止
+              直到找到为止(一般不勾选)
             </el-checkbox>
 
             <el-button
@@ -2152,6 +2178,18 @@ function buttonLabel(button: MouseButton) {
   color: var(--el-text-color-regular);
   font-size: 13px;
   font-weight: 600;
+}
+
+.operation-object-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.operation-object-hint {
+  color: #f56c6c;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .operation-form :deep(.el-select),
@@ -2537,7 +2575,7 @@ function buttonLabel(button: MouseButton) {
 
 .region-hint {
   margin-left: 6px;
-  color: var(--el-text-color-secondary);
+  color: var(--el-color-warning);
   font-size: 12px;
   font-weight: 400;
 }

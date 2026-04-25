@@ -325,7 +325,7 @@ function formatTime(timestamp: number) {
     <div class="macro-toolbar">
       <div>
         <strong>宏方案</strong>
-        <span>{{ state.playing ? "正在回放所选宏" : "全局热键将回放当前选择" }}</span>
+        <span>{{ state.playing ? "正在回放所选宏" : "使用全局启停热键回放当前选择" }}</span>
       </div>
       <el-button type="primary" :icon="Plus" :disabled="state.playing" @click="openCreateWindow">
         新增

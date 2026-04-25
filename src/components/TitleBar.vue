@@ -4,15 +4,26 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Close,
+  Coordinate,
   Minus,
   QuestionFilled,
   Setting,
   Top,
 } from "@element-plus/icons-vue";
-import type { GlobalHotkeyOptions } from "../types";
+import GlobalHotkeyBar from "./GlobalHotkeyBar.vue";
+import type { GlobalHotkeyOptions, HotkeyConfig } from "../types";
 
 type ThemeMode = "light" | "dark" | "system";
 type CloseAction = "exit" | "hide";
+
+const props = defineProps<{
+  modelValue: HotkeyConfig;
+  hotkeyDisabled?: boolean;
+}>();
+
+const emit = defineEmits<{
+  "update:modelValue": [value: HotkeyConfig];
+}>();
 
 const alwaysOnTop = ref(false);
 const showWindowOnStop = ref(true);
@@ -22,6 +33,7 @@ const appWindow = getCurrentWindow();
 const themeMode = ref<ThemeMode>("system");
 const closeAction = ref<CloseAction>("hide");
 const settingsVisible = ref(false);
+const hotkeyPopoverVisible = ref(false);
 const exitMenuVisible = ref(false);
 
 const systemDarkQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -126,6 +138,7 @@ async function closeWindow() {
 }
 
 async function startWindowDrag() {
+  hotkeyPopoverVisible.value = false;
   await appWindow.startDragging();
 }
 
@@ -164,6 +177,32 @@ function hideExitMenu() {
       >
         <el-icon :size="14"><Setting /></el-icon>
       </button>
+      <el-popover
+        v-model:visible="hotkeyPopoverVisible"
+        placement="bottom-start"
+        :width="340"
+        trigger="click"
+      >
+        <template #reference>
+          <button
+            class="settings-btn"
+            type="button"
+            title="全局启停热键"
+            aria-label="全局启停热键"
+            @mousedown.stop
+          >
+            <el-icon :size="14"><Coordinate /></el-icon>
+          </button>
+        </template>
+        <div class="hotkey-popover-panel" @mousedown.stop>
+          <GlobalHotkeyBar
+            :model-value="props.modelValue"
+            :disabled="props.hotkeyDisabled"
+            variant="popover"
+            @update:modelValue="emit('update:modelValue', $event)"
+          />
+        </div>
+      </el-popover>
     </div>
     <div class="window-actions" @mousedown.stop>
       <el-checkbox
@@ -322,6 +361,10 @@ function hideExitMenu() {
 .settings-btn:hover {
   color: var(--el-text-color-primary);
   background: var(--el-fill-color-light);
+}
+
+.hotkey-popover-panel {
+  padding: 2px;
 }
 
 .settings-panel {

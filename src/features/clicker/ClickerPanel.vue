@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { QuestionFilled } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import {
   type ClickerConfig,
@@ -143,7 +144,19 @@ function handleModeChange() {
 <template>
   <section class="settings-panel">
     <el-form label-position="left" label-width="86px" class="settings-form">
-      <el-form-item label="连点方式">
+      <el-form-item>
+        <template #label>
+          <span class="mode-label">
+            <span>连点方式</span>
+            <el-tooltip
+              v-if="config.mode === 'hold'"
+              content="先按下全局启停热键后，按住鼠标连点"
+              placement="top"
+            >
+              <el-icon class="mode-help-icon" :size="14"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </span>
+        </template>
         <el-segmented
           v-model="config.mode"
           :options="modeOptions"
@@ -241,6 +254,21 @@ function handleModeChange() {
   font-size: 13px;
   font-weight: 600;
   line-height: 32px;
+}
+
+.mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mode-help-icon {
+  color: var(--el-text-color-secondary);
+  cursor: help;
+}
+
+.mode-help-icon:hover {
+  color: var(--el-color-primary);
 }
 
 .settings-form :deep(.el-form-item__content) {
