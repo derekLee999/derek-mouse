@@ -197,17 +197,34 @@ Rust 端直接使用了 Win32 Hook、`SendInput`、屏幕像素读取等 Windows
 
 ### OpenCV 额外要求
 
-当前项目的 `src-tauri/build.rs` 里写死了 OpenCV 的头文件和库路径：
+当前项目的 `src-tauri/build.rs` 已改为“环境变量优先，固定路径兜底”：
 
-```text
-C:\tools\opencv\opencv\build\include
-C:\tools\opencv\opencv\build\x64\vc16\lib
+- 推荐方式：
+  - 设置 `OPENCV_DIR`
+- 也支持更细粒度的配置：
+  - `OPENCV_INCLUDE_DIR`
+  - `OPENCV_LIB_DIR`
+  - `OPENCV_BIN_DIR`
+- 如果都没有设置，构建脚本最后会尝试当前默认兜底路径：
+  - `C:\tools\opencv\opencv\build`
+
+最推荐的做法是只设置 `OPENCV_DIR`，并让它指向 OpenCV 的 `build` 目录，例如：
+
+```powershell
+$env:OPENCV_DIR="C:\tools\opencv\opencv\build"
 ```
 
-也就是说，本地开发环境如果要成功编译 Rust 端，需要满足以下任一条件：
+如果你想长期保存在 PowerShell 配置里，也可以把这行写进自己的 PowerShell profile。
 
-1. 按这个目录安装 / 解压 OpenCV 4.9
-2. 自己修改 `src-tauri/build.rs` 中的路径
+如果使用拆分变量，目录结构通常应当类似：
+
+```text
+OPENCV_INCLUDE_DIR -> C:\tools\opencv\opencv\build\include
+OPENCV_LIB_DIR     -> C:\tools\opencv\opencv\build\x64\vc16\lib
+OPENCV_BIN_DIR     -> C:\tools\opencv\opencv\build\x64\vc16\bin
+```
+
+如果环境变量和默认兜底路径都不可用，`build.rs` 会直接报清晰错误，而不是要求你去手改源码。
 
 运行时项目会尝试把 `opencv_world490.dll` 复制到目标目录；仓库根目录下也已经放了一份 DLL 用于打包 / 开发时加载。
 
@@ -319,7 +336,7 @@ src-tauri/
 
 - 这是一个真实依赖 Windows API 的桌面工具，不是普通网页应用。
 - 纯前端预览不等于功能可用，关键能力必须通过 Tauri 运行。
-- OpenCV 构建路径目前是硬编码的，换机器开发前需要先处理这部分。
+- OpenCV 仍然是本地原生依赖，但现在优先通过环境变量配置，不需要再为了换机器去修改 `build.rs`。
 - OCR 不是内置模型，首次使用文字识别时需要先在应用里下载安装引擎。
 - 录制和鼠标宏的数据都直接落在用户目录，没有接数据库。
 

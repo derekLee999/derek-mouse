@@ -64,6 +64,11 @@ type FindTextResult = {
   text: string;
 };
 
+type SavedWindowSize = {
+  width: number;
+  height: number;
+};
+
 type CaptureImageResult = {
   dataUrl: string;
   width: number;
@@ -78,6 +83,8 @@ type PickedRegion = {
 };
 
 const currentWindow = getCurrentWindow();
+const MOUSE_MACRO_EDITOR_WINDOW_SIZE_KEY = "mouse-macro-editor-window-size";
+const WINDOW_RESIZE_SAVE_DELAY_MS = 150;
 
 const urlParams = new URLSearchParams(window.location.search);
 const editMacroId = urlParams.get("id");
@@ -163,6 +170,9 @@ let unlistenCoordinate: UnlistenFn | undefined;
 let unlistenRegion: UnlistenFn | undefined;
 let unlistenColor: UnlistenFn | undefined;
 let unlistenOcrInstall: UnlistenFn | undefined;
+let unlistenWindowResize: UnlistenFn | undefined;
+let restoringEventToEditor = false;
+let resizeSaveTimer: number | undefined;
 
 type DragState = {
   index: number;
@@ -283,6 +293,9 @@ onMounted(async () => {
       }
     },
   );
+  unlistenWindowResize = await currentWindow.onResized(() => {
+    scheduleWindowSizeSave();
+  });
   document.addEventListener("click", closeEventMenu);
   document.addEventListener("keydown", handleDocumentKeydown);
 });
@@ -292,9 +305,11 @@ onBeforeUnmount(() => {
   unlistenRegion?.();
   unlistenColor?.();
   unlistenOcrInstall?.();
+  unlistenWindowResize?.();
   if (pickingCoordinate.value) {
     void cancelCoordinatePick();
   }
+  flushWindowSizeSave();
   document.removeEventListener("click", closeEventMenu);
   document.removeEventListener("keydown", handleDocumentKeydown);
 });
@@ -302,6 +317,9 @@ onBeforeUnmount(() => {
 watch(operationObject, (value) => {
   closeEventMenu();
   appendDelay.value = false;
+  if (!restoringEventToEditor && selectedEventId.value !== null) {
+    selectedEventId.value = null;
+  }
   if (value === "mouse") {
     mouseOperation.value = "mouseClick";
   } else if (value === "keyboard") {
@@ -327,6 +345,37 @@ watch(keyboardOperation, () => {
 
 function defaultMacroName() {
   return `宏方案 ${Date.now()}`;
+}
+
+function saveWindowSize(size: SavedWindowSize) {
+  localStorage.setItem(MOUSE_MACRO_EDITOR_WINDOW_SIZE_KEY, JSON.stringify(size));
+}
+
+async function persistCurrentWindowSize() {
+  const [size, scaleFactor] = await Promise.all([currentWindow.innerSize(), currentWindow.scaleFactor()]);
+  const logicalSize = size.toLogical(scaleFactor);
+  saveWindowSize({
+    width: Math.round(logicalSize.width),
+    height: Math.round(logicalSize.height),
+  });
+}
+
+function scheduleWindowSizeSave() {
+  if (resizeSaveTimer !== undefined) {
+    window.clearTimeout(resizeSaveTimer);
+  }
+  resizeSaveTimer = window.setTimeout(() => {
+    resizeSaveTimer = undefined;
+    void persistCurrentWindowSize();
+  }, WINDOW_RESIZE_SAVE_DELAY_MS);
+}
+
+function flushWindowSizeSave() {
+  if (resizeSaveTimer !== undefined) {
+    window.clearTimeout(resizeSaveTimer);
+    resizeSaveTimer = undefined;
+  }
+  void persistCurrentWindowSize();
 }
 
 function handleDocumentKeydown(event: KeyboardEvent) {
@@ -861,87 +910,92 @@ function closeEventMenu() {
 }
 
 function restoreEventToEditor(event: DraftEvent) {
-  switch (event.kind) {
-    case "mouseMove":
-      operationObject.value = "mouse";
-      mouseOperation.value = "mouseMove";
-      moveX.value = event.x ?? 0;
-      moveY.value = event.y ?? 0;
-      appendDelay.value = false;
-      // 延迟设置 followUpAction，避免被 mouseOperation 的 watcher 覆盖
-      nextTick(() => {
-        followUpAction.value = event.followUp ?? "none";
-      });
-      break;
-    case "mouseClick":
-    case "mouseDoubleClick":
-    case "mouseDown":
-    case "mouseUp":
-      operationObject.value = "mouse";
-      mouseOperation.value = event.kind;
-      selectedButton.value = event.button as MouseButton;
-      appendDelay.value = false;
-      break;
-    case "keyClick":
-    case "keyDown":
-    case "keyUp":
-      operationObject.value = "keyboard";
-      keyboardOperation.value = event.kind;
-      selectedKey.value = event.key ?? "";
-      appendDelay.value = false;
-      break;
-    case "delay":
-      operationObject.value = "delay";
-      delayMs.value = event.ms ?? 100;
-      appendDelay.value = false;
-      break;
-    case "findImage":
-      operationObject.value = "findImage";
-      findRegionMode.value = "custom";
-      findX1.value = event.region.x1;
-      findY1.value = event.region.y1;
-      findX2.value = event.region.x2;
-      findY2.value = event.region.y2;
-      findImageData.value = event.imageData;
-      findImageName.value = "已保存的模板图";
-      findThreshold.value = event.threshold;
-      findScale.value = event.scale;
-      findAction.value = event.action;
-      findWaitUntilFound.value = event.waitUntilFound;
-      findImageOffsetX.value = event.offsetX ?? 0;
-      findImageOffsetY.value = event.offsetY ?? 0;
-      appendDelay.value = false;
-      break;
-    case "findColor":
-      operationObject.value = "findColor";
-      findRegionMode.value = "custom";
-      findX1.value = event.region.x1;
-      findY1.value = event.region.y1;
-      findX2.value = event.region.x2;
-      findY2.value = event.region.y2;
-      findColorHex.value = event.color;
-      findColorThreshold.value = event.threshold;
-      findColorAction.value = event.action;
-      findColorWaitUntilFound.value = event.waitUntilFound;
-      findColorOffsetX.value = event.offsetX ?? 0;
-      findColorOffsetY.value = event.offsetY ?? 0;
-      appendDelay.value = false;
-      break;
-    case "findText":
-      operationObject.value = "findText";
-      findRegionMode.value = "custom";
-      findX1.value = event.region.x1;
-      findY1.value = event.region.y1;
-      findX2.value = event.region.x2;
-      findY2.value = event.region.y2;
-      findTextValue.value = event.text;
-      findTextAction.value = event.action;
-      findTextWaitUntilFound.value = event.waitUntilFound;
-      findTextOffsetX.value = event.offsetX ?? 0;
-      findTextOffsetY.value = event.offsetY ?? 0;
-      appendDelay.value = false;
-      void checkOcrEngine();
-      break;
+  restoringEventToEditor = true;
+  try {
+    switch (event.kind) {
+      case "mouseMove":
+        operationObject.value = "mouse";
+        mouseOperation.value = "mouseMove";
+        moveX.value = event.x ?? 0;
+        moveY.value = event.y ?? 0;
+        appendDelay.value = false;
+        // 延迟设置 followUpAction，避免被 mouseOperation 的 watcher 覆盖
+        nextTick(() => {
+          followUpAction.value = event.followUp ?? "none";
+        });
+        break;
+      case "mouseClick":
+      case "mouseDoubleClick":
+      case "mouseDown":
+      case "mouseUp":
+        operationObject.value = "mouse";
+        mouseOperation.value = event.kind;
+        selectedButton.value = event.button as MouseButton;
+        appendDelay.value = false;
+        break;
+      case "keyClick":
+      case "keyDown":
+      case "keyUp":
+        operationObject.value = "keyboard";
+        keyboardOperation.value = event.kind;
+        selectedKey.value = event.key ?? "";
+        appendDelay.value = false;
+        break;
+      case "delay":
+        operationObject.value = "delay";
+        delayMs.value = event.ms ?? 100;
+        appendDelay.value = false;
+        break;
+      case "findImage":
+        operationObject.value = "findImage";
+        findRegionMode.value = "custom";
+        findX1.value = event.region.x1;
+        findY1.value = event.region.y1;
+        findX2.value = event.region.x2;
+        findY2.value = event.region.y2;
+        findImageData.value = event.imageData;
+        findImageName.value = "已保存的模板图";
+        findThreshold.value = event.threshold;
+        findScale.value = event.scale;
+        findAction.value = event.action;
+        findWaitUntilFound.value = event.waitUntilFound;
+        findImageOffsetX.value = event.offsetX ?? 0;
+        findImageOffsetY.value = event.offsetY ?? 0;
+        appendDelay.value = false;
+        break;
+      case "findColor":
+        operationObject.value = "findColor";
+        findRegionMode.value = "custom";
+        findX1.value = event.region.x1;
+        findY1.value = event.region.y1;
+        findX2.value = event.region.x2;
+        findY2.value = event.region.y2;
+        findColorHex.value = event.color;
+        findColorThreshold.value = event.threshold;
+        findColorAction.value = event.action;
+        findColorWaitUntilFound.value = event.waitUntilFound;
+        findColorOffsetX.value = event.offsetX ?? 0;
+        findColorOffsetY.value = event.offsetY ?? 0;
+        appendDelay.value = false;
+        break;
+      case "findText":
+        operationObject.value = "findText";
+        findRegionMode.value = "custom";
+        findX1.value = event.region.x1;
+        findY1.value = event.region.y1;
+        findX2.value = event.region.x2;
+        findY2.value = event.region.y2;
+        findTextValue.value = event.text;
+        findTextAction.value = event.action;
+        findTextWaitUntilFound.value = event.waitUntilFound;
+        findTextOffsetX.value = event.offsetX ?? 0;
+        findTextOffsetY.value = event.offsetY ?? 0;
+        appendDelay.value = false;
+        void checkOcrEngine();
+        break;
+    }
+  } finally {
+    restoringEventToEditor = false;
   }
 }
 

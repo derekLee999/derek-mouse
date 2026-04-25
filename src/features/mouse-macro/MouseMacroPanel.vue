@@ -8,6 +8,12 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Plus, RefreshRight, VideoPlay } from "@element-plus/icons-vue";
 import type { MouseMacroState, MouseMacroSummary } from "../../types";
 
+const MOUSE_MACRO_EDITOR_WINDOW_SIZE_KEY = "mouse-macro-editor-window-size";
+const MOUSE_MACRO_EDITOR_DEFAULT_WIDTH = 880;
+const MOUSE_MACRO_EDITOR_DEFAULT_HEIGHT = 792;
+const MOUSE_MACRO_EDITOR_MIN_WIDTH = 760;
+const MOUSE_MACRO_EDITOR_MIN_HEIGHT = 682;
+
 const state = ref<MouseMacroState>({
   macros: [],
   selectedId: null,
@@ -67,6 +73,28 @@ async function selectMacro(id: number) {
   state.value = await invoke<MouseMacroState>("select_mouse_macro", { id });
 }
 
+function getMouseMacroEditorWindowSize() {
+  const fallback = {
+    width: MOUSE_MACRO_EDITOR_DEFAULT_WIDTH,
+    height: MOUSE_MACRO_EDITOR_DEFAULT_HEIGHT,
+  };
+  const saved = localStorage.getItem(MOUSE_MACRO_EDITOR_WINDOW_SIZE_KEY);
+  if (!saved) return fallback;
+
+  try {
+    const parsed = JSON.parse(saved) as { width?: number; height?: number };
+    const width = Number.isFinite(parsed.width)
+      ? Math.max(Math.round(parsed.width ?? fallback.width), MOUSE_MACRO_EDITOR_MIN_WIDTH)
+      : fallback.width;
+    const height = Number.isFinite(parsed.height)
+      ? Math.max(Math.round(parsed.height ?? fallback.height), MOUSE_MACRO_EDITOR_MIN_HEIGHT)
+      : fallback.height;
+    return { width, height };
+  } catch {
+    return fallback;
+  }
+}
+
 function handleMacroCheck(macro: MouseMacroSummary, checked: string | number | boolean) {
   if (!checked || state.value.playing) return;
   void selectMacro(macro.id);
@@ -77,6 +105,7 @@ async function openCreateWindow() {
 
   const label = `mouse-macro-editor-${Date.now()}`;
   const mainWindow = getCurrentWindow();
+  const size = getMouseMacroEditorWindowSize();
   await mainWindow.setEnabled(false);
 
   const restoreMainWindow = async () => {
@@ -88,10 +117,10 @@ async function openCreateWindow() {
   const editor = new WebviewWindow(label, {
     url: "/index.html?view=mouse-macro-editor",
     title: "新增鼠标宏",
-    width: 880,
-    height: 792,
-    minWidth: 760,
-    minHeight: 682,
+    width: size.width,
+    height: size.height,
+    minWidth: MOUSE_MACRO_EDITOR_MIN_WIDTH,
+    minHeight: MOUSE_MACRO_EDITOR_MIN_HEIGHT,
     center: true,
     resizable: true,
     decorations: false,
@@ -159,6 +188,7 @@ async function openEditWindow(macroId: number) {
 
   const label = `mouse-macro-editor-${Date.now()}`;
   const mainWindow = getCurrentWindow();
+  const size = getMouseMacroEditorWindowSize();
   await mainWindow.setEnabled(false);
 
   const restoreMainWindow = async () => {
@@ -170,10 +200,10 @@ async function openEditWindow(macroId: number) {
   const editor = new WebviewWindow(label, {
     url: `/index.html?view=mouse-macro-editor&id=${macroId}`,
     title: "编辑鼠标宏",
-    width: 880,
-    height: 792,
-    minWidth: 760,
-    minHeight: 682,
+    width: size.width,
+    height: size.height,
+    minWidth: MOUSE_MACRO_EDITOR_MIN_WIDTH,
+    minHeight: MOUSE_MACRO_EDITOR_MIN_HEIGHT,
     center: true,
     resizable: true,
     decorations: false,
