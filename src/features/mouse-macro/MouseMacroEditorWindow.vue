@@ -1760,7 +1760,8 @@ function buttonLabel(button: MouseButton) {
               <el-input
                 v-model="findTextValue"
                 placeholder="输入要识别的文字"
-                clearable
+                maxlength="7"
+                show-word-limit
               />
             </el-form-item>
 
