@@ -36,3 +36,7 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gd
 imageproc = "0.26.1"
 xcap = "0.9.4"
 base64 = "0.22.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
+sevenz-rust = "0.6"
+tempfile = "3"

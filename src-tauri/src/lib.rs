@@ -2,6 +2,7 @@ mod clicker;
 mod config;
 mod input;
 mod mouse_macro;
+mod ocr_engine;
 mod recorder;
 mod tray;
 
@@ -475,6 +476,28 @@ fn test_mouse_macro_find_color(
 }
 
 #[tauri::command]
+fn test_mouse_macro_find_text(
+    request: mouse_macro::FindTextRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<mouse_macro::FindTextResult, String> {
+    state.mouse_macro.test_find_text(request)
+}
+
+#[tauri::command]
+fn check_ocr_engine_installed() -> Result<bool, String> {
+    Ok(ocr_engine::is_installed())
+}
+
+#[tauri::command]
+async fn install_ocr_engine(app: tauri::AppHandle) -> Result<(), String> {
+    let app_clone = app.clone();
+    ocr_engine::download_and_install(move |progress| {
+        let _ = app_clone.emit("ocr-engine-install-progress", progress);
+    })
+    .await
+}
+
+#[tauri::command]
 fn capture_mouse_macro_region_image(
     region: FindImageRegion,
     state: tauri::State<'_, Arc<AppState>>,
@@ -797,6 +820,9 @@ pub fn run() {
             stop_mouse_macro,
             test_mouse_macro_find_image,
             test_mouse_macro_find_color,
+            test_mouse_macro_find_text,
+            check_ocr_engine_installed,
+            install_ocr_engine,
             capture_mouse_macro_region_image,
             get_mouse_macro_screen_bounds,
             start_mouse_coordinate_pick,

@@ -44,6 +44,7 @@ use crate::{
         button_from_name, key_from_name, simulate, Button, Event, EventType, HotkeyConfig, Key,
         KeyboardTracker,
     },
+    ocr_engine::{image_to_base64_png, OcrEngine},
     tray::{self, TrayStatus},
 };
 
@@ -101,6 +102,10 @@ pub enum MacroEvent {
         action: String,
         #[serde(rename = "waitUntilFound", alias = "wait_until_found")]
         wait_until_found: bool,
+        #[serde(rename = "offsetX", alias = "offset_x")]
+        offset_x: i32,
+        #[serde(rename = "offsetY", alias = "offset_y")]
+        offset_y: i32,
     },
     FindColor {
         region: FindImageRegion,
@@ -109,6 +114,21 @@ pub enum MacroEvent {
         action: String,
         #[serde(rename = "waitUntilFound", alias = "wait_until_found")]
         wait_until_found: bool,
+        #[serde(rename = "offsetX", alias = "offset_x")]
+        offset_x: i32,
+        #[serde(rename = "offsetY", alias = "offset_y")]
+        offset_y: i32,
+    },
+    FindText {
+        region: FindImageRegion,
+        text: String,
+        action: String,
+        #[serde(rename = "waitUntilFound", alias = "wait_until_found")]
+        wait_until_found: bool,
+        #[serde(rename = "offsetX", alias = "offset_x")]
+        offset_x: i32,
+        #[serde(rename = "offsetY", alias = "offset_y")]
+        offset_y: i32,
     },
 }
 
@@ -130,6 +150,8 @@ pub struct FindImageRequest {
     pub scale: f64,
     pub action: String,
     pub wait_until_found: bool,
+    pub offset_x: i32,
+    pub offset_y: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +162,8 @@ pub struct FindColorRequest {
     pub threshold: u8,
     pub action: String,
     pub wait_until_found: bool,
+    pub offset_x: i32,
+    pub offset_y: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -159,6 +183,26 @@ pub struct FindColorResult {
     pub found: bool,
     pub x: i32,
     pub y: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindTextRequest {
+    pub region: FindImageRegion,
+    pub text: String,
+    pub action: String,
+    pub wait_until_found: bool,
+    pub offset_x: i32,
+    pub offset_y: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindTextResult {
+    pub found: bool,
+    pub x: i32,
+    pub y: i32,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,12 +282,14 @@ pub struct MouseMacroRuntime {
     injecting_event: Arc<AtomicBool>,
     suppress_playback_hotkey_release: AtomicBool,
     next_id: Mutex<u64>,
+    ocr_engine: Arc<Mutex<Option<OcrEngine>>>,
 }
 
 impl MouseMacroRuntime {
     pub fn new() -> Self {
         let (macros, next_id) = load_macros();
         let first_id = macros.first().map(|item| item.id);
+        let ocr = OcrEngine::new().ok();
         Self {
             macros: Mutex::new(macros),
             selected_id: Mutex::new(first_id),
@@ -252,6 +298,7 @@ impl MouseMacroRuntime {
             injecting_event: Arc::new(AtomicBool::new(false)),
             suppress_playback_hotkey_release: AtomicBool::new(false),
             next_id: Mutex::new(next_id),
+            ocr_engine: Arc::new(Mutex::new(ocr)),
         }
     }
 
@@ -405,6 +452,7 @@ impl MouseMacroRuntime {
 
         let playback_flag = self.playing.clone();
         let injecting_flag = self.injecting_event.clone();
+        let ocr_engine = self.ocr_engine.clone();
 
         thread::spawn(move || {
             let speed = scheme.playback_speed.max(0.1);
@@ -426,7 +474,7 @@ impl MouseMacroRuntime {
                     }
 
                     injecting_flag.store(true, Ordering::SeqCst);
-                    let event_result = play_macro_event(event, speed, &playback_flag);
+                    let event_result = play_macro_event(event, speed, &playback_flag, &ocr_engine);
                     injecting_flag.store(false, Ordering::SeqCst);
                     if event_result.is_err() {
                         playback_flag.store(false, Ordering::SeqCst);
@@ -464,6 +512,16 @@ impl MouseMacroRuntime {
     pub fn test_find_color(&self, request: FindColorRequest) -> Result<FindColorResult, String> {
         validate_find_color_request(&request)?;
         find_color_once(&request)
+    }
+
+    pub fn test_find_text(&self, request: FindTextRequest) -> Result<FindTextResult, String> {
+        validate_find_text_request(&request)?;
+        let mut engine = self.ocr_engine.lock().map_err(|e| e.to_string())?;
+        if engine.is_none() {
+            *engine = Some(OcrEngine::new()?);
+        }
+        let engine = engine.as_ref().unwrap();
+        find_text_once(&request, engine)
     }
 
     pub fn capture_region_image(
@@ -654,6 +712,7 @@ fn play_macro_event(
     event: &MacroEvent,
     speed: f64,
     playback_flag: &AtomicBool,
+    ocr_engine: &std::sync::Mutex<Option<OcrEngine>>,
 ) -> Result<(), String> {
     match event {
         MacroEvent::MouseClick { button } => {
@@ -701,6 +760,8 @@ fn play_macro_event(
             scale,
             action,
             wait_until_found,
+            offset_x,
+            offset_y,
         } => play_find_image_event(
             FindImageRequest {
                 region: region.clone(),
@@ -709,6 +770,8 @@ fn play_macro_event(
                 scale: *scale,
                 action: action.clone(),
                 wait_until_found: *wait_until_found,
+                offset_x: *offset_x,
+                offset_y: *offset_y,
             },
             playback_flag,
             speed,
@@ -719,6 +782,8 @@ fn play_macro_event(
             threshold,
             action,
             wait_until_found,
+            offset_x,
+            offset_y,
         } => play_find_color_event(
             FindColorRequest {
                 region: region.clone(),
@@ -726,9 +791,31 @@ fn play_macro_event(
                 threshold: *threshold,
                 action: action.clone(),
                 wait_until_found: *wait_until_found,
+                offset_x: *offset_x,
+                offset_y: *offset_y,
             },
             playback_flag,
             speed,
+        ),
+        MacroEvent::FindText {
+            region,
+            text,
+            action,
+            wait_until_found,
+            offset_x,
+            offset_y,
+        } => play_find_text_event(
+            FindTextRequest {
+                region: region.clone(),
+                text: text.clone(),
+                action: action.clone(),
+                wait_until_found: *wait_until_found,
+                offset_x: *offset_x,
+                offset_y: *offset_y,
+            },
+            playback_flag,
+            speed,
+            ocr_engine,
         ),
     }
 }
@@ -821,13 +908,19 @@ fn play_find_image_event(
         };
 
         if result.found {
+            let target_x = result.x + request.offset_x;
+            let target_y = result.y + request.offset_y;
             simulate(&EventType::MouseMove {
-                x: f64::from(result.x),
-                y: f64::from(result.y),
+                x: f64::from(target_x),
+                y: f64::from(target_y),
             })
             .map_err(|err| err.to_string())?;
 
             if request.action == "click" {
+                click_button(Button::Left, speed)?;
+            } else if request.action == "doubleClick" {
+                click_button(Button::Left, speed)?;
+                sleep_adjusted(45, speed);
                 click_button(Button::Left, speed)?;
             }
             return Ok(());
@@ -858,13 +951,19 @@ fn play_find_color_event(
         let result = find_color_in_image(&search_image, target_rgb, request.threshold, &region);
 
         if result.found {
+            let target_x = result.x + request.offset_x;
+            let target_y = result.y + request.offset_y;
             simulate(&EventType::MouseMove {
-                x: f64::from(result.x),
-                y: f64::from(result.y),
+                x: f64::from(target_x),
+                y: f64::from(target_y),
             })
             .map_err(|err| err.to_string())?;
 
             if request.action == "click" {
+                click_button(Button::Left, speed)?;
+            } else if request.action == "doubleClick" {
+                click_button(Button::Left, speed)?;
+                sleep_adjusted(45, speed);
                 click_button(Button::Left, speed)?;
             }
             return Ok(());
@@ -884,6 +983,88 @@ fn find_color_once(request: &FindColorRequest) -> Result<FindColorResult, String
     let target_rgb = hex_to_rgb(&request.color)?;
     let search_image = capture_region(&region)?;
     Ok(find_color_in_image(&search_image, target_rgb, request.threshold, &region))
+}
+
+fn play_find_text_event(
+    request: FindTextRequest,
+    playback_flag: &AtomicBool,
+    speed: f64,
+    ocr_engine: &std::sync::Mutex<Option<OcrEngine>>,
+) -> Result<(), String> {
+    validate_find_text_request(&request)?;
+
+    loop {
+        let mut engine = ocr_engine.lock().map_err(|e| e.to_string())?;
+        if engine.is_none() {
+            *engine = Some(OcrEngine::new()?);
+        }
+        let engine = engine.as_ref().unwrap();
+
+        let result = find_text_once(&request, engine)?;
+
+        if result.found {
+            let target_x = result.x + request.offset_x;
+            let target_y = result.y + request.offset_y;
+            simulate(&EventType::MouseMove {
+                x: f64::from(target_x),
+                y: f64::from(target_y),
+            })
+            .map_err(|err| err.to_string())?;
+
+            if request.action == "click" {
+                click_button(Button::Left, speed)?;
+            } else if request.action == "doubleClick" {
+                click_button(Button::Left, speed)?;
+                sleep_adjusted(45, speed);
+                click_button(Button::Left, speed)?;
+            }
+            return Ok(());
+        }
+
+        if !request.wait_until_found || !playback_flag.load(Ordering::SeqCst) {
+            return Err(format!("Text '{}' not found in search region", request.text));
+        }
+
+        sleep_adjusted(500, speed);
+    }
+}
+
+fn find_text_once(
+    request: &FindTextRequest,
+    engine: &OcrEngine,
+) -> Result<FindTextResult, String> {
+    let region = normalize_region(&request.region)?;
+    let search_image = capture_region(&region)?;
+    let image_data = image_to_base64_png(&search_image)?;
+    let results = engine.recognize(&image_data)?;
+
+    for item in &results {
+        if item.text == request.text {
+            return Ok(FindTextResult {
+                found: true,
+                x: region.x1 + item.center_x,
+                y: region.y1 + item.center_y,
+                text: item.text.clone(),
+            });
+        }
+    }
+
+    Ok(FindTextResult {
+        found: false,
+        x: 0,
+        y: 0,
+        text: String::new(),
+    })
+}
+
+fn validate_find_text_request(request: &FindTextRequest) -> Result<(), String> {
+    normalize_region(&request.region)?;
+    validate_find_image_action(&request.action)?;
+    if request.text.is_empty() {
+        return Err("Search text cannot be empty".to_string());
+    }
+    validate_offset(request.offset_x, request.offset_y)?;
+    Ok(())
 }
 
 fn find_color_in_image(
@@ -927,6 +1108,7 @@ fn validate_find_color_request(request: &FindColorRequest) -> Result<(), String>
     normalize_region(&request.region)?;
     hex_to_rgb(&request.color)?;
     validate_find_image_action(&request.action)?;
+    validate_offset(request.offset_x, request.offset_y)?;
     Ok(())
 }
 
@@ -1009,6 +1191,7 @@ fn validate_find_image_request(request: &FindImageRequest) -> Result<(), String>
     normalize_find_image_threshold(request.threshold)?;
     normalize_find_image_scale(request.scale)?;
     validate_find_image_action(&request.action)?;
+    validate_offset(request.offset_x, request.offset_y)?;
     Ok(())
 }
 
@@ -1043,9 +1226,20 @@ fn normalize_find_image_scale(scale: f64) -> Result<f64, String> {
 
 fn validate_find_image_action(action: &str) -> Result<(), String> {
     match action {
-        "click" | "move" => Ok(()),
+        "click" | "doubleClick" | "move" => Ok(()),
         _ => Err("Unsupported find-image follow-up action".to_string()),
     }
+}
+
+fn validate_offset(offset_x: i32, offset_y: i32) -> Result<(), String> {
+    const MAX_OFFSET: i32 = 500;
+    if offset_x.abs() > MAX_OFFSET {
+        return Err(format!("X offset must be between -{} and {}", MAX_OFFSET, MAX_OFFSET));
+    }
+    if offset_y.abs() > MAX_OFFSET {
+        return Err(format!("Y offset must be between -{} and {}", MAX_OFFSET, MAX_OFFSET));
+    }
+    Ok(())
 }
 
 fn decode_macro_image(data_url: &str) -> Result<RgbaImage, String> {
@@ -1246,6 +1440,8 @@ fn validate_macro_event(event: MacroEvent) -> Result<MacroEvent, String> {
             scale,
             action,
             wait_until_found,
+            offset_x,
+            offset_y,
         } => {
             validate_find_image_request(&FindImageRequest {
                 region: region.clone(),
@@ -1254,6 +1450,8 @@ fn validate_macro_event(event: MacroEvent) -> Result<MacroEvent, String> {
                 scale: *scale,
                 action: action.clone(),
                 wait_until_found: *wait_until_found,
+                offset_x: *offset_x,
+                offset_y: *offset_y,
             })?;
         }
         MacroEvent::FindColor {
@@ -1262,6 +1460,8 @@ fn validate_macro_event(event: MacroEvent) -> Result<MacroEvent, String> {
             threshold,
             action,
             wait_until_found,
+            offset_x,
+            offset_y,
         } => {
             validate_find_color_request(&FindColorRequest {
                 region: region.clone(),
@@ -1269,6 +1469,25 @@ fn validate_macro_event(event: MacroEvent) -> Result<MacroEvent, String> {
                 threshold: *threshold,
                 action: action.clone(),
                 wait_until_found: *wait_until_found,
+                offset_x: *offset_x,
+                offset_y: *offset_y,
+            })?;
+        }
+        MacroEvent::FindText {
+            region,
+            text,
+            action,
+            wait_until_found,
+            offset_x,
+            offset_y,
+        } => {
+            validate_find_text_request(&FindTextRequest {
+                region: region.clone(),
+                text: text.clone(),
+                action: action.clone(),
+                wait_until_found: *wait_until_found,
+                offset_x: *offset_x,
+                offset_y: *offset_y,
             })?;
         }
     }

@@ -13,12 +13,13 @@ import {
   type MouseMacroFindImageAction,
   type MouseMacroFindImageEvent,
   type MouseMacroFindColorEvent,
+  type MouseMacroFindTextEvent,
   type MouseMacroEvent,
   type MouseMacroDetail,
   type MouseMacroState,
 } from "../../types";
 
-type OperationObject = "mouse" | "keyboard" | "delay" | "findImage" | "findColor";
+type OperationObject = "mouse" | "keyboard" | "delay" | "findImage" | "findColor" | "findText";
 type MouseOperation = "mouseClick" | "mouseDoubleClick" | "mouseDown" | "mouseUp" | "mouseMove";
 type KeyboardOperation = "keyClick" | "keyDown" | "keyUp";
 
@@ -54,6 +55,13 @@ type FindColorResult = {
   found: boolean;
   x: number;
   y: number;
+};
+
+type FindTextResult = {
+  found: boolean;
+  x: number;
+  y: number;
+  text: string;
 };
 
 type CaptureImageResult = {
@@ -104,6 +112,8 @@ const findThreshold = ref(65);
 const findScale = ref(1);
 const findAction = ref<MouseMacroFindImageAction>("click");
 const findWaitUntilFound = ref(false);
+const findImageOffsetX = ref(0);
+const findImageOffsetY = ref(0);
 const findingTest = ref(false);
 const capturingTemplate = ref(false);
 
@@ -112,8 +122,26 @@ const findColorHex = ref("#FF0000");
 const findColorThreshold = ref(10);
 const findColorAction = ref<MouseMacroFindImageAction>("click");
 const findColorWaitUntilFound = ref(false);
+const findColorOffsetX = ref(0);
+const findColorOffsetY = ref(0);
 const findingColorTest = ref(false);
 const pickingColor = ref(false);
+
+// 文字识别相关
+const findTextValue = ref("");
+const findTextAction = ref<MouseMacroFindImageAction>("click");
+const findTextWaitUntilFound = ref(false);
+const findTextOffsetX = ref(0);
+const findTextOffsetY = ref(0);
+const findingTextTest = ref(false);
+
+// OCR 引擎安装
+const ocrInstalled = ref<boolean | null>(null);
+const ocrInstalling = ref(false);
+const ocrInstallDialogVisible = ref(false);
+const ocrInstallProgress = ref(0);
+const ocrInstallStatus = ref("ready");
+const ocrInstallMessage = ref("已就绪，点击安装开始下载安装...");
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const selectedEventId = ref<number | null>(null);
 const eventMenu = ref<{
@@ -134,6 +162,7 @@ let nextEventId = 1;
 let unlistenCoordinate: UnlistenFn | undefined;
 let unlistenRegion: UnlistenFn | undefined;
 let unlistenColor: UnlistenFn | undefined;
+let unlistenOcrInstall: UnlistenFn | undefined;
 
 type DragState = {
   index: number;
@@ -164,6 +193,7 @@ const operationObjectOptions = [
   { label: "延迟等待", value: "delay" },
   { label: "找图", value: "findImage" },
   { label: "找色", value: "findColor" },
+  { label: "文字识别", value: "findText" },
 ] as const;
 
 const canSave = computed(() => macroName.value.trim().length > 0 && events.value.length > 0);
@@ -192,6 +222,13 @@ const canAddEvent = computed(() => {
       Number.isInteger(findColorThreshold.value) &&
       findColorThreshold.value >= 0 &&
       findColorThreshold.value <= 255
+    );
+  }
+  if (operationObject.value === "findText") {
+    return (
+      findX1.value !== findX2.value &&
+      findY1.value !== findY2.value &&
+      findTextValue.value.trim().length > 0
     );
   }
   if (operationObject.value === "mouse" && mouseOperation.value === "mouseMove") {
@@ -228,6 +265,24 @@ onMounted(async () => {
     handlePickedColor(event.payload.color);
     pickingCoordinate.value = false;
   });
+  unlistenOcrInstall = await listen<{ status: string; progress: number; message: string }>(
+    "ocr-engine-install-progress",
+    (event) => {
+      const payload = event.payload;
+      ocrInstallStatus.value = payload.status;
+      ocrInstallProgress.value = payload.progress;
+      ocrInstallMessage.value = payload.message;
+      if (payload.status === "completed") {
+        ocrInstalling.value = false;
+        ocrInstalled.value = true;
+        ocrInstallDialogVisible.value = false;
+        ElMessage.success("OCR 引擎安装完成。");
+      } else if (payload.status === "error") {
+        ocrInstalling.value = false;
+        ElMessage.error(payload.message || "安装失败");
+      }
+    },
+  );
   document.addEventListener("click", closeEventMenu);
   document.addEventListener("keydown", handleDocumentKeydown);
 });
@@ -236,6 +291,7 @@ onBeforeUnmount(() => {
   unlistenCoordinate?.();
   unlistenRegion?.();
   unlistenColor?.();
+  unlistenOcrInstall?.();
   if (pickingCoordinate.value) {
     void cancelCoordinatePick();
   }
@@ -254,6 +310,9 @@ watch(operationObject, (value) => {
     applyFullSearchRegion();
   } else if (value === "findColor" && screenBounds.value && findRegionMode.value === "full") {
     applyFullSearchRegion();
+  } else if (value === "findText" && screenBounds.value && findRegionMode.value === "full") {
+    applyFullSearchRegion();
+    void checkOcrEngine();
   }
 });
 
@@ -308,6 +367,76 @@ function handleColorThresholdChange(value: number | undefined) {
   findColorThreshold.value = normalizeInteger(value, 10, 0, 255);
 }
 
+async function checkOcrEngine() {
+  try {
+    ocrInstalled.value = await invoke<boolean>("check_ocr_engine_installed");
+  } catch {
+    ocrInstalled.value = false;
+  }
+}
+
+function openOcrRepo() {
+  window.open("https://github.com/hiroi-sora/RapidOCR-json", "_blank");
+}
+
+async function installOcrEngine() {
+  if (ocrInstalling.value) return;
+  ocrInstalling.value = true;
+  ocrInstallProgress.value = 0;
+  ocrInstallStatus.value = "downloading";
+  ocrInstallMessage.value = "开始下载 OCR 引擎...";
+  try {
+    await invoke("install_ocr_engine");
+  } catch (error) {
+    ocrInstalling.value = false;
+    ElMessage.error(String(error));
+  }
+}
+
+function buildFindTextEvent(): MouseMacroFindTextEvent {
+  return {
+    kind: "findText",
+    region: {
+      x1: normalizeInteger(findX1.value, 0, Number.MIN_SAFE_INTEGER),
+      y1: normalizeInteger(findY1.value, 0, Number.MIN_SAFE_INTEGER),
+      x2: normalizeInteger(findX2.value, 0, Number.MIN_SAFE_INTEGER),
+      y2: normalizeInteger(findY2.value, 0, Number.MIN_SAFE_INTEGER),
+    },
+    text: findTextValue.value.trim(),
+    action: findTextAction.value,
+    waitUntilFound: findTextWaitUntilFound.value,
+    offsetX: normalizeInteger(findTextOffsetX.value, 0, -500, 500),
+    offsetY: normalizeInteger(findTextOffsetY.value, 0, -500, 500),
+  };
+}
+
+async function testFindText() {
+  if (!canAddEvent.value || operationObject.value !== "findText") {
+    ElMessage.warning("请先补全文字识别配置。");
+    return;
+  }
+  if (!ocrInstalled.value) {
+    ElMessage.warning("OCR 引擎未安装，请先安装。");
+    return;
+  }
+
+  findingTextTest.value = true;
+  try {
+    const result = await invoke<FindTextResult>("test_mouse_macro_find_text", {
+      request: buildFindTextEvent(),
+    });
+    if (result.found) {
+      ElMessage.success(`找到文字，坐标 ${result.x}, ${result.y}`);
+    } else {
+      ElMessage.warning("未在区域内找到指定文字。");
+    }
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    findingTextTest.value = false;
+  }
+}
+
 async function loadScreenBounds() {
   try {
     screenBounds.value = await invoke<CoordinatePickSnapshotMeta>("get_mouse_macro_screen_bounds");
@@ -338,10 +467,10 @@ function handleThresholdChange(value: number | undefined) {
   findThreshold.value = normalizeInteger(value, 65, 1, 100);
 }
 
-function handleScaleChange(value: number | undefined) {
-  const normalized = typeof value === "number" && Number.isFinite(value) ? value : 1;
-  findScale.value = Math.min(Math.max(Math.round(normalized * 100) / 100, 0.1), 5);
-}
+// function handleScaleChange(value: number | undefined) {
+//   const normalized = typeof value === "number" && Number.isFinite(value) ? value : 1;
+//   findScale.value = Math.min(Math.max(Math.round(normalized * 100) / 100, 0.1), 5);
+// }
 
 function handleDelayChange(value: number | undefined) {
   delayMs.value = normalizeInteger(value, 100, 5, 60000);
@@ -525,6 +654,10 @@ function buildEvent(): MouseMacroEvent {
     return buildFindColorEvent();
   }
 
+  if (operationObject.value === "findText") {
+    return buildFindTextEvent();
+  }
+
   if (operationObject.value === "keyboard") {
     return { kind: keyboardOperation.value, key: selectedKey.value };
   }
@@ -553,6 +686,8 @@ function buildFindColorEvent(): MouseMacroFindColorEvent {
     threshold: normalizeInteger(findColorThreshold.value, 10, 0, 255),
     action: findColorAction.value,
     waitUntilFound: findColorWaitUntilFound.value,
+    offsetX: normalizeInteger(findColorOffsetX.value, 0, -500, 500),
+    offsetY: normalizeInteger(findColorOffsetY.value, 0, -500, 500),
   };
 }
 
@@ -570,6 +705,8 @@ function buildFindImageEvent(): MouseMacroFindImageEvent {
     scale: Math.min(Math.max(Math.round(findScale.value * 100) / 100, 0.1), 5),
     action: findAction.value,
     waitUntilFound: findWaitUntilFound.value,
+    offsetX: normalizeInteger(findImageOffsetX.value, 0, -500, 500),
+    offsetY: normalizeInteger(findImageOffsetY.value, 0, -500, 500),
   };
 }
 
@@ -771,6 +908,8 @@ function restoreEventToEditor(event: DraftEvent) {
       findScale.value = event.scale;
       findAction.value = event.action;
       findWaitUntilFound.value = event.waitUntilFound;
+      findImageOffsetX.value = event.offsetX ?? 0;
+      findImageOffsetY.value = event.offsetY ?? 0;
       appendDelay.value = false;
       break;
     case "findColor":
@@ -784,7 +923,24 @@ function restoreEventToEditor(event: DraftEvent) {
       findColorThreshold.value = event.threshold;
       findColorAction.value = event.action;
       findColorWaitUntilFound.value = event.waitUntilFound;
+      findColorOffsetX.value = event.offsetX ?? 0;
+      findColorOffsetY.value = event.offsetY ?? 0;
       appendDelay.value = false;
+      break;
+    case "findText":
+      operationObject.value = "findText";
+      findRegionMode.value = "custom";
+      findX1.value = event.region.x1;
+      findY1.value = event.region.y1;
+      findX2.value = event.region.x2;
+      findY2.value = event.region.y2;
+      findTextValue.value = event.text;
+      findTextAction.value = event.action;
+      findTextWaitUntilFound.value = event.waitUntilFound;
+      findTextOffsetX.value = event.offsetX ?? 0;
+      findTextOffsetY.value = event.offsetY ?? 0;
+      appendDelay.value = false;
+      void checkOcrEngine();
       break;
   }
 }
@@ -1013,6 +1169,8 @@ function eventAction(event: DraftEvent) {
       return "找图";
     case "findColor":
       return "找色";
+    case "findText":
+      return "文字识别";
   }
 }
 
@@ -1034,10 +1192,21 @@ function eventTarget(event: DraftEvent) {
       return event.key;
     case "delay":
       return `${event.ms} ms`;
-    case "findImage":
-      return `${event.threshold}% · ${event.action === "click" ? "点击" : "移动到"}`;
-    case "findColor":
-      return `${event.color} · ${event.action === "click" ? "点击" : "移动到"}`;
+    case "findImage": {
+      const actionLabel = event.action === "click" ? "点击" : event.action === "doubleClick" ? "双击" : "移动到";
+      const offset = event.offsetX || event.offsetY ? ` · 偏移(${event.offsetX}, ${event.offsetY})` : "";
+      return `${event.threshold}% · ${actionLabel}${offset}`;
+    }
+    case "findColor": {
+      const actionLabel = event.action === "click" ? "点击" : event.action === "doubleClick" ? "双击" : "移动到";
+      const offset = event.offsetX || event.offsetY ? ` · 偏移(${event.offsetX}, ${event.offsetY})` : "";
+      return `${event.color} · ${actionLabel}${offset}`;
+    }
+    case "findText": {
+      const actionLabel = event.action === "click" ? "点击" : event.action === "doubleClick" ? "双击" : "移动到";
+      const offset = event.offsetX || event.offsetY ? ` · 偏移(${event.offsetX}, ${event.offsetY})` : "";
+      return `${event.text} · ${actionLabel}${offset}`;
+    }
   }
 }
 
@@ -1244,7 +1413,11 @@ function buttonLabel(button: MouseButton) {
           </el-form-item>
 
           <template v-if="operationObject === 'findImage'">
-            <el-form-item label="找图区域">
+            <el-form-item>
+              <template #label>
+                找图区域
+                <span class="region-hint">尽可能缩小区域范围</span>
+              </template>
               <div class="find-region-tools">
                 <el-button size="small" :disabled="!screenBounds" @click="applyFullSearchRegion">
                   全图
@@ -1259,7 +1432,7 @@ function buttonLabel(button: MouseButton) {
                   v-model="findX1"
                   :step="1"
                   :precision="0"
-                  controls-position="right"
+                  :controls="false"
                   @change="handleFindRegionNumberChange"
                 />
                 <span>Y1</span>
@@ -1267,7 +1440,7 @@ function buttonLabel(button: MouseButton) {
                   v-model="findY1"
                   :step="1"
                   :precision="0"
-                  controls-position="right"
+                  :controls="false"
                   @change="handleFindRegionNumberChange"
                 />
                 <span>X2</span>
@@ -1275,7 +1448,7 @@ function buttonLabel(button: MouseButton) {
                   v-model="findX2"
                   :step="1"
                   :precision="0"
-                  controls-position="right"
+                  :controls="false"
                   @change="handleFindRegionNumberChange"
                 />
                 <span>Y2</span>
@@ -1283,7 +1456,7 @@ function buttonLabel(button: MouseButton) {
                   v-model="findY2"
                   :step="1"
                   :precision="0"
-                  controls-position="right"
+                  :controls="false"
                   @change="handleFindRegionNumberChange"
                 />
               </div>
@@ -1346,26 +1519,35 @@ function buttonLabel(button: MouseButton) {
               </div>
             </el-form-item>
 
-            <el-form-item label="缩放" class="inline-find-field">
-              <div class="threshold-row">
-                <el-input-number
-                  v-model="findScale"
-                  :min="0.1"
-                  :max="5"
-                  :step="0.1"
-                  :precision="2"
-                  controls-position="right"
-                  @change="handleScaleChange"
-                />
-                <span>倍</span>
-              </div>
-            </el-form-item>
-
             <el-form-item label="后续操作" class="inline-find-field">
               <el-select v-model="findAction">
                 <el-option label="点击" value="click" />
+                <el-option label="双击" value="doubleClick" />
                 <el-option label="移动到" value="move" />
               </el-select>
+            </el-form-item>
+
+            <el-form-item>
+              <div class="offset-row">
+                <span>X偏</span>
+                <el-input-number
+                  v-model="findImageOffsetX"
+                  :min="-500"
+                  :max="500"
+                  :step="1"
+                  :precision="0"
+                  :controls="false"
+                />
+                <span>Y偏</span>
+                <el-input-number
+                  v-model="findImageOffsetY"
+                  :min="-500"
+                  :max="500"
+                  :step="1"
+                  :precision="0"
+                  :controls="false"
+                />
+              </div>
             </el-form-item>
 
             <el-checkbox v-model="findWaitUntilFound" class="wait-until-found">
@@ -1374,7 +1556,11 @@ function buttonLabel(button: MouseButton) {
           </template>
 
           <template v-if="operationObject === 'findColor'">
-            <el-form-item label="找色区域">
+            <el-form-item>
+              <template #label>
+                找色区域
+                <span class="region-hint">尽可能缩小区域范围</span>
+              </template>
               <div class="find-region-tools">
                 <el-button size="small" :disabled="!screenBounds" @click="applyFullSearchRegion">
                   全图
@@ -1389,7 +1575,7 @@ function buttonLabel(button: MouseButton) {
                   v-model="findX1"
                   :step="1"
                   :precision="0"
-                  controls-position="right"
+                  :controls="false"
                   @change="handleFindRegionNumberChange"
                 />
                 <span>Y1</span>
@@ -1397,7 +1583,7 @@ function buttonLabel(button: MouseButton) {
                   v-model="findY1"
                   :step="1"
                   :precision="0"
-                  controls-position="right"
+                  :controls="false"
                   @change="handleFindRegionNumberChange"
                 />
                 <span>X2</span>
@@ -1405,7 +1591,7 @@ function buttonLabel(button: MouseButton) {
                   v-model="findX2"
                   :step="1"
                   :precision="0"
-                  controls-position="right"
+                  :controls="false"
                   @change="handleFindRegionNumberChange"
                 />
                 <span>Y2</span>
@@ -1413,7 +1599,7 @@ function buttonLabel(button: MouseButton) {
                   v-model="findY2"
                   :step="1"
                   :precision="0"
-                  controls-position="right"
+                  :controls="false"
                   @change="handleFindRegionNumberChange"
                 />
               </div>
@@ -1459,8 +1645,32 @@ function buttonLabel(button: MouseButton) {
             <el-form-item label="后续操作" class="inline-find-field">
               <el-select v-model="findColorAction">
                 <el-option label="点击" value="click" />
+                <el-option label="双击" value="doubleClick" />
                 <el-option label="移动到" value="move" />
               </el-select>
+            </el-form-item>
+
+            <el-form-item>
+              <div class="offset-row">
+                <span>X偏</span>
+                <el-input-number
+                  v-model="findColorOffsetX"
+                  :min="-500"
+                  :max="500"
+                  :step="1"
+                  :precision="0"
+                  :controls="false"
+                />
+                <span>Y偏</span>
+                <el-input-number
+                  v-model="findColorOffsetY"
+                  :min="-500"
+                  :max="500"
+                  :step="1"
+                  :precision="0"
+                  :controls="false"
+                />
+              </div>
             </el-form-item>
 
             <el-checkbox v-model="findColorWaitUntilFound" class="wait-until-found">
@@ -1477,9 +1687,131 @@ function buttonLabel(button: MouseButton) {
               测试
             </el-button>
           </template>
+
+          <template v-if="operationObject === 'findText'">
+            <div v-if="ocrInstalled === false" class="ocr-install-hint">
+              <el-alert
+                title="文字识别引擎未安装"
+                type="warning"
+                :closable="false"
+                show-icon
+              >
+                <template #default>
+                  <div class="ocr-install-hint-content">
+                    <span>请安装 RapidOCR-json 文字识别引擎以使用此功能。</span>
+                    <el-button size="small" type="primary" @click="ocrInstallDialogVisible = true">
+                      安装引擎
+                    </el-button>
+                  </div>
+                </template>
+              </el-alert>
+            </div>
+
+            <el-form-item>
+              <template #label>
+                识别区域
+                <span class="region-hint">尽可能缩小区域范围</span>
+              </template>
+              <div class="find-region-tools">
+                <el-button size="small" :disabled="!screenBounds" @click="applyFullSearchRegion">
+                  全图
+                </el-button>
+                <el-button size="small" :icon="Aim" @click="startFindRegionPick">
+                  选取区域
+                </el-button>
+              </div>
+              <div class="find-coordinate-grid">
+                <span>X1</span>
+                <el-input-number
+                  v-model="findX1"
+                  :step="1"
+                  :precision="0"
+                  :controls="false"
+                  @change="handleFindRegionNumberChange"
+                />
+                <span>Y1</span>
+                <el-input-number
+                  v-model="findY1"
+                  :step="1"
+                  :precision="0"
+                  :controls="false"
+                  @change="handleFindRegionNumberChange"
+                />
+                <span>X2</span>
+                <el-input-number
+                  v-model="findX2"
+                  :step="1"
+                  :precision="0"
+                  :controls="false"
+                  @change="handleFindRegionNumberChange"
+                />
+                <span>Y2</span>
+                <el-input-number
+                  v-model="findY2"
+                  :step="1"
+                  :precision="0"
+                  :controls="false"
+                  @change="handleFindRegionNumberChange"
+                />
+              </div>
+            </el-form-item>
+
+            <el-form-item label="查找文字">
+              <el-input
+                v-model="findTextValue"
+                placeholder="输入要识别的文字"
+                clearable
+              />
+            </el-form-item>
+
+            <el-form-item label="后续操作" class="inline-find-field">
+              <el-select v-model="findTextAction">
+                <el-option label="点击" value="click" />
+                <el-option label="双击" value="doubleClick" />
+                <el-option label="移动到" value="move" />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item>
+              <div class="offset-row">
+                <span>X偏</span>
+                <el-input-number
+                  v-model="findTextOffsetX"
+                  :min="-500"
+                  :max="500"
+                  :step="1"
+                  :precision="0"
+                  :controls="false"
+                />
+                <span>Y偏</span>
+                <el-input-number
+                  v-model="findTextOffsetY"
+                  :min="-500"
+                  :max="500"
+                  :step="1"
+                  :precision="0"
+                  :controls="false"
+                />
+              </div>
+            </el-form-item>
+
+            <el-checkbox v-model="findTextWaitUntilFound" class="wait-until-found">
+              直到找到为止
+            </el-checkbox>
+
+            <el-button
+              size="small"
+              :icon="Search"
+              :loading="findingTextTest"
+              :disabled="!canAddEvent || ocrInstalled !== true"
+              @click="testFindText"
+            >
+              测试
+            </el-button>
+          </template>
         </el-form>
 
-        <div v-if="operationObject !== 'delay' && operationObject !== 'findImage' && operationObject !== 'findColor'" class="append-delay-row">
+        <div v-if="operationObject !== 'delay' && operationObject !== 'findImage' && operationObject !== 'findColor' && operationObject !== 'findText'" class="append-delay-row">
           <el-checkbox v-model="appendDelay" size="small">添加延迟</el-checkbox>
           <el-input-number
             v-model="appendDelayMs"
@@ -1523,6 +1855,48 @@ function buttonLabel(button: MouseButton) {
         删除
       </button>
     </div>
+    <el-dialog
+      v-model="ocrInstallDialogVisible"
+      title="安装插件"
+      width="380px"
+      :close-on-click-modal="false"
+      :close-on-press-escape="!ocrInstalling"
+      :show-close="!ocrInstalling"
+      align-center
+    >
+      <div class="ocr-install-dialog">
+        <div class="ocr-install-title">
+          <span>文字识别</span>
+          <span class="ocr-install-subtitle">(RapidOCR-json)</span>
+        </div>
+        <div class="ocr-install-desc">
+          <p class="ocr-install-label">插件说明：</p>
+          <div class="ocr-install-desc-box">
+            此插件支持中(简/繁)文、英文、日文、韩文、俄文等多种语言、识别快、准确度高。
+          </div>
+          <p class="ocr-install-label">仓库地址：</p>
+          <button type="button" class="ocr-repo-link" @click="openOcrRepo">
+            https://github.com/hiroi-sora/RapidOCR-json
+          </button>
+        </div>
+        <p class="ocr-install-status">{{ ocrInstallMessage }}</p>
+        <el-progress
+          :percentage="ocrInstallProgress"
+          :status="ocrInstallStatus === 'error' ? 'exception' : undefined"
+          :show-text="ocrInstallStatus !== 'ready'"
+        />
+      </div>
+      <template #footer>
+        <el-button
+          type="success"
+          :loading="ocrInstalling"
+          :disabled="ocrInstalling"
+          @click="installOcrEngine"
+        >
+          {{ ocrInstalling ? "安装中..." : "安装插件" }}
+        </el-button>
+      </template>
+    </el-dialog>
   </main>
 </template>
 
@@ -1628,7 +2002,7 @@ function buttonLabel(button: MouseButton) {
 
 .macro-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 258px;
+  grid-template-columns: minmax(0, 1fr) 278px;
   gap: 10px;
   min-height: 0;
 }
@@ -1711,21 +2085,7 @@ function buttonLabel(button: MouseButton) {
 }
 
 .operation-form::-webkit-scrollbar {
-  width: 6px;
-}
-
-.operation-form::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.operation-form::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: 3px;
-}
-
-.operation-form:hover::-webkit-scrollbar-thumb,
-.operation-form:active::-webkit-scrollbar-thumb {
-  background: var(--el-text-color-placeholder);
+  display: none;
 }
 
 .operation-form :deep(.el-form-item) {
@@ -1749,6 +2109,13 @@ function buttonLabel(button: MouseButton) {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 8px;
+}
+
+.offset-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
 }
 
 .coordinate-label {
@@ -1810,7 +2177,8 @@ function buttonLabel(button: MouseButton) {
 }
 
 .find-coordinate-grid span,
-.threshold-row span {
+.threshold-row span,
+.offset-row span {
   color: var(--el-text-color-regular);
   font-size: 13px;
   font-weight: 700;
@@ -2041,5 +2409,81 @@ function buttonLabel(button: MouseButton) {
 /* 覆盖 Element Plus 相邻按钮默认的 12px 左间距，确保 grid 对齐 */
 .action-buttons :deep(.el-button + .el-button) {
   margin-left: 0;
+}
+
+.ocr-install-hint {
+  margin-bottom: 10px;
+}
+
+.ocr-install-hint-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.ocr-install-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ocr-install-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.ocr-install-subtitle {
+  color: var(--el-color-success);
+  font-weight: 500;
+}
+
+.ocr-install-label {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ocr-install-desc-box {
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+}
+
+.ocr-install-status {
+  margin: 4px 0 0;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.ocr-repo-link {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  overflow: hidden;
+  color: var(--el-color-primary);
+  font-size: 13px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.ocr-repo-link:hover {
+  text-decoration: underline;
+}
+
+.region-hint {
+  margin-left: 6px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  font-weight: 400;
 }
 </style>
