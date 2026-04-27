@@ -44,7 +44,7 @@ use crate::{
         button_from_name, key_from_name, simulate, Button, Event, EventType, HotkeyConfig, Key,
         KeyboardTracker,
     },
-    ocr_engine::{image_to_base64_png, OcrEngine},
+    ocr_engine::{prepare_image_for_ocr, OcrEngine},
     tray::{self, TrayStatus},
 };
 
@@ -282,14 +282,14 @@ pub struct MouseMacroRuntime {
     injecting_event: Arc<AtomicBool>,
     suppress_playback_hotkey_release: AtomicBool,
     next_id: Mutex<u64>,
-    ocr_engine: Arc<Mutex<Option<OcrEngine>>>,
+    ocr_engine: Arc<Mutex<Option<Arc<OcrEngine>>>>,
 }
 
 impl MouseMacroRuntime {
     pub fn new() -> Self {
         let (macros, next_id) = load_macros();
         let first_id = macros.first().map(|item| item.id);
-        let ocr = OcrEngine::new().ok();
+        let ocr = OcrEngine::new().ok().map(Arc::new);
         Self {
             macros: Mutex::new(macros),
             selected_id: Mutex::new(first_id),
@@ -516,7 +516,10 @@ impl MouseMacroRuntime {
 
     pub fn test_find_text(&self, request: FindTextRequest) -> Result<FindTextResult, String> {
         validate_find_text_request(&request)?;
-        find_text_once_with_recovery(&request, &self.ocr_engine)
+        let region = normalize_region(&request.region)?;
+        let monitors = Monitor::all().map_err(|err| err.to_string())?;
+        let relevant_monitors = find_relevant_monitors(&region, &monitors)?;
+        find_text_once_with_recovery(&request, &region, &relevant_monitors, &self.ocr_engine)
     }
 
     pub fn capture_region_image(
@@ -707,7 +710,7 @@ fn play_macro_event(
     event: &MacroEvent,
     speed: f64,
     playback_flag: &AtomicBool,
-    ocr_engine: &std::sync::Mutex<Option<OcrEngine>>,
+    ocr_engine: &std::sync::Mutex<Option<Arc<OcrEngine>>>,
 ) -> Result<(), String> {
     match event {
         MacroEvent::MouseClick { button } => {
@@ -984,12 +987,15 @@ fn play_find_text_event(
     request: FindTextRequest,
     playback_flag: &AtomicBool,
     speed: f64,
-    ocr_engine: &std::sync::Mutex<Option<OcrEngine>>,
+    ocr_engine: &std::sync::Mutex<Option<Arc<OcrEngine>>>,
 ) -> Result<(), String> {
     validate_find_text_request(&request)?;
+    let region = normalize_region(&request.region)?;
+    let monitors = Monitor::all().map_err(|err| err.to_string())?;
+    let relevant_monitors = find_relevant_monitors(&region, &monitors)?;
 
     loop {
-        let result = find_text_once_with_recovery(&request, ocr_engine)?;
+        let result = find_text_once_with_recovery(&request, &region, &relevant_monitors, ocr_engine)?;
 
         if result.found {
             let target_x = result.x + request.offset_x;
@@ -1020,19 +1026,21 @@ fn play_find_text_event(
 
 fn find_text_once_with_recovery(
     request: &FindTextRequest,
-    ocr_engine: &std::sync::Mutex<Option<OcrEngine>>,
+    region: &FindImageRegion,
+    relevant_monitors: &[&Monitor],
+    ocr_engine: &std::sync::Mutex<Option<Arc<OcrEngine>>>,
 ) -> Result<FindTextResult, String> {
     let mut has_retried = false;
 
     loop {
-        let result = {
+        let engine = {
             let mut engine = ocr_engine.lock().map_err(|e| e.to_string())?;
             if engine.is_none() {
-                *engine = Some(OcrEngine::new()?);
+                *engine = Some(Arc::new(OcrEngine::new()?));
             }
-            let engine = engine.as_ref().unwrap();
-            find_text_once(request, engine)
+            engine.as_ref().unwrap().clone()
         };
+        let result = find_text_once(request, region, relevant_monitors, engine.as_ref());
 
         match result {
             Ok(result) => return Ok(result),
@@ -1040,7 +1048,7 @@ fn find_text_once_with_recovery(
                 has_retried = true;
                 let mut engine = ocr_engine.lock().map_err(|e| e.to_string())?;
                 *engine = None;
-                *engine = Some(OcrEngine::new()?);
+                *engine = Some(Arc::new(OcrEngine::new()?));
             }
             Err(error) => return Err(error),
         }
@@ -1058,19 +1066,20 @@ fn should_restart_ocr_engine(error: &str) -> bool {
 
 fn find_text_once(
     request: &FindTextRequest,
+    region: &FindImageRegion,
+    relevant_monitors: &[&Monitor],
     engine: &OcrEngine,
 ) -> Result<FindTextResult, String> {
-    let region = normalize_region(&request.region)?;
-    let search_image = capture_region(&region)?;
-    let image_data = image_to_base64_png(&search_image)?;
-    let results = engine.recognize(&image_data)?;
+    let search_image = capture_region_with_monitors(region, relevant_monitors)?;
+    let prepared = prepare_image_for_ocr(&search_image)?;
+    let results = engine.recognize(&prepared.data_url)?;
 
     for item in &results {
         if item.text == request.text {
             return Ok(FindTextResult {
                 found: true,
-                x: region.x1 + item.center_x,
-                y: region.y1 + item.center_y,
+                x: region.x1 + scale_ocr_coordinate(item.center_x, prepared.scale_x),
+                y: region.y1 + scale_ocr_coordinate(item.center_y, prepared.scale_y),
                 text: item.text.clone(),
             });
         }
@@ -1082,6 +1091,10 @@ fn find_text_once(
         y: 0,
         text: String::new(),
     })
+}
+
+fn scale_ocr_coordinate(value: i32, scale: f32) -> i32 {
+    ((value as f32) * scale).round() as i32
 }
 
 fn validate_find_text_request(request: &FindTextRequest) -> Result<(), String> {

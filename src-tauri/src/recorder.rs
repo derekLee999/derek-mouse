@@ -109,6 +109,8 @@ pub struct UpdateRecordingLoopPlaybackRequest {
 pub struct SaveEditedRecordingRequest {
     id: u64,
     removed_event_indices: Vec<usize>,
+    #[serde(default)]
+    optimized_delay_event_indices: Vec<usize>,
     mode: SaveEditedRecordingMode,
 }
 
@@ -392,14 +394,29 @@ impl RecorderRuntime {
         {
             return Err("Edited event selection is invalid".to_string());
         }
+        if request
+            .optimized_delay_event_indices
+            .iter()
+            .any(|index| *index >= original.events.len())
+        {
+            return Err("Edited event delay selection is invalid".to_string());
+        }
 
         let removed_indices: HashSet<usize> = request.removed_event_indices.into_iter().collect();
+        let optimized_delay_indices: HashSet<usize> =
+            request.optimized_delay_event_indices.into_iter().collect();
         let events = original
             .events
             .iter()
             .enumerate()
             .filter(|(index, _)| !removed_indices.contains(index))
-            .map(|(_, event)| event.clone())
+            .map(|(index, event)| {
+                let mut event = event.clone();
+                if optimized_delay_indices.contains(&index) && event.delay_ms > 100 {
+                    event.delay_ms = 100;
+                }
+                event
+            })
             .collect();
 
         let now_ms = unix_ms();

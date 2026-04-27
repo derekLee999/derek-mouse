@@ -9,6 +9,10 @@ import type { RecordingDetail, RecordingEventSummary, RecorderState } from "../.
 
 type SaveMode = "append" | "replace";
 
+const OPTIMIZED_DELAY_MS = 100;
+const OPTIMIZABLE_DELAY_THRESHOLD_MS = 100;
+const OPTIMIZABLE_DELAY_ACTIONS = new Set(["鼠标按下", "鼠标释放", "键盘按下", "键盘释放"]);
+
 const recordingIdParam = new URLSearchParams(window.location.search).get("id");
 const recordingId = recordingIdParam ? Number(recordingIdParam) : NaN;
 const currentWindow = getCurrentWindow();
@@ -20,6 +24,7 @@ const events = ref<RecordingEventSummary[]>([]);
 const eventListRef = ref<HTMLElement | null>(null);
 const selectedEventIndices = ref<Set<number>>(new Set());
 const removedEventIndices = ref<Set<number>>(new Set());
+const optimizedDelayEventIndices = ref<Set<number>>(new Set());
 const activeEventIndex = ref<number | null>(null);
 const closingProgrammatically = ref(false);
 const alwaysOnTop = ref(false);
@@ -50,6 +55,9 @@ let unlistenClose: UnlistenFn | undefined;
 const selectedCount = computed(() => selectedEventIndices.value.size);
 const eventCount = computed(() => events.value.length);
 const hasRemovedEvents = computed(() => removedEventIndices.value.size > 0);
+const hasOptimizedDelayEvents = computed(() => optimizedDelayEventIndices.value.size > 0);
+const hasPendingEdits = computed(() => hasRemovedEvents.value || hasOptimizedDelayEvents.value);
+const displayDurationMs = computed(() => events.value.reduce((total, event) => total + event.delayMs, 0));
 const activeEventPosition = computed(() => {
   if (activeEventIndex.value === null) return -1;
   return events.value.findIndex((event) => event.index === activeEventIndex.value);
@@ -73,7 +81,7 @@ const shouldShowUpdatedAt = computed(() => {
 
 onMounted(async () => {
   unlistenClose = await currentWindow.onCloseRequested(async (event) => {
-    if (closingProgrammatically.value || !hasRemovedEvents.value) return;
+    if (closingProgrammatically.value || !hasPendingEdits.value) return;
 
     event.preventDefault();
     closeConfirmVisible.value = true;
@@ -103,6 +111,10 @@ async function loadRecording() {
     const detail = await invoke<RecordingDetail>("get_recording_detail", { id: recordingId });
     recording.value = detail;
     events.value = detail.events;
+    selectedEventIndices.value = new Set();
+    removedEventIndices.value = new Set();
+    optimizedDelayEventIndices.value = new Set();
+    activeEventIndex.value = null;
   } catch (error) {
     ElMessage.error(String(error));
     await closeWindow();
@@ -183,6 +195,9 @@ async function deleteEvents(indices: number[]) {
   selected.forEach((index) => removed.add(index));
   removedEventIndices.value = removed;
   events.value = events.value.filter((event) => !selected.has(event.index));
+  optimizedDelayEventIndices.value = new Set(
+    Array.from(optimizedDelayEventIndices.value).filter((index) => !selected.has(index)),
+  );
   selectedEventIndices.value = new Set(
     Array.from(selectedEventIndices.value).filter((index) => !selected.has(index)),
   );
@@ -195,15 +210,20 @@ async function deleteEvents(indices: number[]) {
 function openEventMenu(event: MouseEvent, recordingEvent: RecordingEventSummary) {
   event.preventDefault();
   closeOperationMenu();
+  closeEventMenu();
 
   const menuWidth = 112;
-  const menuHeight = 42;
+  const menuHeight = canOptimizeDelay(recordingEvent) ? 74 : 42;
   eventMenu.value = {
     visible: true,
     x: Math.min(event.clientX, window.innerWidth - menuWidth - 8),
     y: Math.min(event.clientY, window.innerHeight - menuHeight - 8),
     event: recordingEvent,
   };
+}
+
+function canOptimizeDelay(event: RecordingEventSummary) {
+  return event.delayMs > OPTIMIZABLE_DELAY_THRESHOLD_MS && OPTIMIZABLE_DELAY_ACTIONS.has(event.action);
 }
 
 function closeEventMenu() {
@@ -245,11 +265,33 @@ function handleDocumentKeydown(event: KeyboardEvent) {
   }
 }
 
+function optimizeEventDelay(index: number) {
+  const currentEvent = events.value.find((event) => event.index === index);
+  if (!currentEvent || !canOptimizeDelay(currentEvent)) {
+    return;
+  }
+
+  events.value = events.value.map((event) =>
+    event.index === index ? { ...event, delayMs: OPTIMIZED_DELAY_MS } : event,
+  );
+  optimizedDelayEventIndices.value = new Set([
+    ...Array.from(optimizedDelayEventIndices.value),
+    index,
+  ]);
+}
+
+function optimizeDelayFromMenu() {
+  const event = eventMenu.value.event;
+  if (!event) return;
+
+  optimizeEventDelay(event.index);
+  closeEventMenu();
+}
+
 async function deleteEventFromMenu() {
   const event = eventMenu.value.event;
   if (!event) return;
 
-  closeEventMenu();
   await deleteEvents([event.index]);
 }
 
@@ -287,8 +329,8 @@ function scrollEventListToTop() {
 }
 
 async function saveRecording() {
-  if (!hasRemovedEvents.value) {
-    ElMessage.warning("还没有删除事件。");
+  if (!hasPendingEdits.value) {
+    ElMessage.warning("还没有编辑内容。");
     return false;
   }
 
@@ -299,7 +341,7 @@ async function saveRecording() {
 }
 
 async function saveRecordingWithMode(mode: SaveMode) {
-  if (!hasRemovedEvents.value) {
+  if (!hasPendingEdits.value) {
     await closeWindow();
     return true;
   }
@@ -310,12 +352,14 @@ async function saveRecordingWithMode(mode: SaveMode) {
       request: {
         id: recordingId,
         removedEventIndices: Array.from(removedEventIndices.value),
+        optimizedDelayEventIndices: Array.from(optimizedDelayEventIndices.value),
         mode,
       },
     });
     await emitTo("main", "recorder-state", state);
     ElMessage.success("已保存编辑方案。");
     removedEventIndices.value = new Set();
+    optimizedDelayEventIndices.value = new Set();
     await closeWindow();
     return true;
   } catch (error) {
@@ -352,7 +396,7 @@ async function toggleAlwaysOnTop() {
 }
 
 async function requestCloseWindow() {
-  if (hasRemovedEvents.value) {
+  if (hasPendingEdits.value) {
     closeConfirmVisible.value = true;
     return;
   }
@@ -388,13 +432,16 @@ function formatTime(timestamp: number | undefined) {
     <header class="titlebar" @mousedown="startWindowDrag">
       <div class="titlebar-title">
         <img src="/app-icon.png" alt="" class="titlebar-icon" />
-        <span>编辑 - 优化方案  【事件：{{ eventCount }} &nbsp;&nbsp;时长：{{ recording ? formatDuration(recording.durationMs) : "--" }}】</span>
+        <span>编辑 - 优化方案  【事件：{{ eventCount }} &nbsp;&nbsp;时长：{{ formatDuration(displayDurationMs) }}】</span>
         <div class="titlebar-tags">
           <el-tag class="selected-tag" type="success" effect="light" size="small">
             已选 {{ selectedCount }}
           </el-tag>
           <el-tag v-if="hasRemovedEvents" class="removed-tag" type="danger" effect="light" size="small">
             已删除 {{ removedEventIndices.size }}
+          </el-tag>
+          <el-tag v-if="hasOptimizedDelayEvents" type="warning" effect="light" size="small">
+            已优化 {{ optimizedDelayEventIndices.size }}
           </el-tag>
         </div>
       </div>
@@ -404,7 +451,7 @@ function formatTime(timestamp: number | undefined) {
           type="button"
           title="保存"
           aria-label="保存"
-          :disabled="loading || saving || !hasRemovedEvents"
+          :disabled="loading || saving || !hasPendingEdits"
           @click="saveRecording"
         >
           <el-icon><DocumentChecked /></el-icon>
@@ -574,6 +621,14 @@ function formatTime(timestamp: number | undefined) {
       @mousedown.stop
       @contextmenu.prevent
     >
+      <button
+        v-if="eventMenu.event && canOptimizeDelay(eventMenu.event)"
+        type="button"
+        class="event-context-item"
+        @click="optimizeDelayFromMenu"
+      >
+        优化延迟
+      </button>
       <button type="button" class="event-context-item danger" @click="deleteEventFromMenu">
         删除
       </button>
@@ -588,7 +643,7 @@ function formatTime(timestamp: number | undefined) {
       append-to-body
     >
       <p class="close-confirm-text">
-        当前已删除事件，关闭前请选择处理方式。
+        当前有未保存的编辑，关闭前请选择处理方式。
       </p>
       <template #footer>
         <div class="close-actions">

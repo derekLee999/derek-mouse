@@ -7,12 +7,19 @@ use std::{
 };
 
 use base64::{engine::general_purpose, Engine as _};
+use image::{
+    codecs::png::{CompressionType, FilterType as PngFilterType, PngEncoder},
+    imageops::{grayscale, resize, FilterType},
+    ExtendedColorType, GrayImage, ImageEncoder,
+};
 use serde::{Deserialize, Serialize};
 
 
 const OCR_DOWNLOAD_URL: &str = "https://github.com/hiroi-sora/RapidOCR-json/releases/download/v0.2.0/RapidOCR-json_v0.2.0.7z";
 const OCR_SHA256: &str = "7ad9b283d03436c6cd0296723188699299cb4e5cf9140b410c59543aa5793c40";
 const OCR_EXE_NAME: &str = "RapidOCR-json.exe";
+const OCR_MAX_IMAGE_DIMENSION: u32 = 1920;
+const OCR_MAX_IMAGE_PIXELS: u64 = 2_500_000;
 
 pub fn engine_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".derek-mouse").join("ocr-engine"))
@@ -178,6 +185,12 @@ pub struct OcrText {
     pub score: f64,
     pub center_x: i32,
     pub center_y: i32,
+}
+
+pub struct PreparedOcrImage {
+    pub data_url: String,
+    pub scale_x: f32,
+    pub scale_y: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,12 +370,47 @@ impl Drop for OcrEngine {
     }
 }
 
-pub fn image_to_base64_png(image: &image::RgbaImage) -> Result<String, String> {
+pub fn prepare_image_for_ocr(image: &image::RgbaImage) -> Result<PreparedOcrImage, String> {
+    let original_width = image.width();
+    let original_height = image.height();
+    let grayscale = grayscale(image);
+    let processed = downscale_for_ocr(grayscale);
+    let encoded = encode_gray_png(&processed)?;
+
+    Ok(PreparedOcrImage {
+        data_url: format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(encoded)),
+        scale_x: original_width as f32 / processed.width() as f32,
+        scale_y: original_height as f32 / processed.height() as f32,
+    })
+}
+
+fn downscale_for_ocr(image: GrayImage) -> GrayImage {
+    let width = image.width();
+    let height = image.height();
+    let pixel_count = u64::from(width) * u64::from(height);
+    let max_dimension = width.max(height);
+
+    if max_dimension <= OCR_MAX_IMAGE_DIMENSION && pixel_count <= OCR_MAX_IMAGE_PIXELS {
+        return image;
+    }
+
+    let scale = OCR_MAX_IMAGE_DIMENSION as f32 / max_dimension as f32;
+    let target_width = ((width as f32 * scale).round() as u32).max(1);
+    let target_height = ((height as f32 * scale).round() as u32).max(1);
+    resize(&image, target_width, target_height, FilterType::Triangle)
+}
+
+fn encode_gray_png(image: &GrayImage) -> Result<Vec<u8>, String> {
     let mut buffer = Vec::new();
-    image::DynamicImage::ImageRgba8(image.clone())
-        .write_to(&mut std::io::Cursor::new(&mut buffer), image::ImageFormat::Png)
+    PngEncoder::new_with_quality(&mut buffer, CompressionType::Fast, PngFilterType::NoFilter)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            ExtendedColorType::L8,
+        )
         .map_err(|e| e.to_string())?;
-    Ok(format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(&buffer)))
+    Ok(buffer)
 }
 
 
