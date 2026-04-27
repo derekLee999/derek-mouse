@@ -12,6 +12,18 @@ export type GlobalHotkeyOptions = {
   autoHideOnHotkey: boolean;
 };
 
+export type AppUpdateInfo = {
+  currentVersion: string;
+  available: boolean;
+  installReady: boolean;
+  latestVersion: string | null;
+  latestTag: string | null;
+  notes: string | null;
+  publishedAt: string | null;
+  releaseUrl: string | null;
+  installHint: string | null;
+};
+
 export type ClickerConfig = {
   clickButton: MouseButton;
   intervalSecs: number;

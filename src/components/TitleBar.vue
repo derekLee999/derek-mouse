@@ -9,9 +9,10 @@ import {
   QuestionFilled,
   Setting,
   Top,
+  UploadFilled,
 } from "@element-plus/icons-vue";
 import GlobalHotkeyBar from "./GlobalHotkeyBar.vue";
-import type { GlobalHotkeyOptions, HotkeyConfig } from "../types";
+import type { AppUpdateInfo, GlobalHotkeyOptions, HotkeyConfig } from "../types";
 
 type ThemeMode = "light" | "dark" | "system";
 type CloseAction = "exit" | "hide";
@@ -19,10 +20,13 @@ type CloseAction = "exit" | "hide";
 const props = defineProps<{
   modelValue: HotkeyConfig;
   hotkeyDisabled?: boolean;
+  updateInfo?: AppUpdateInfo | null;
+  updateInstalling?: boolean;
 }>();
 
 const emit = defineEmits<{
   "update:modelValue": [value: HotkeyConfig];
+  "open-update": [];
 }>();
 
 const alwaysOnTop = ref(false);
@@ -160,13 +164,17 @@ function showExitMenu() {
 function hideExitMenu() {
   exitMenuVisible.value = false;
 }
+
+function openUpdatePanel() {
+  emit("open-update");
+}
 </script>
 
 <template>
   <header class="titlebar" @mousedown="startWindowDrag">
     <div class="titlebar-title">
       <img src="/app-icon.png" alt="" class="titlebar-icon" />
-      <span>鼠标连点器</span>
+      <span class="titlebar-name">鼠标连点器</span>
       <button
         class="settings-btn"
         type="button"
@@ -203,6 +211,24 @@ function hideExitMenu() {
           />
         </div>
       </el-popover>
+      <el-tooltip
+        v-if="props.updateInfo?.available"
+        :content="`检测到新版本 ${props.updateInfo.latestTag ?? props.updateInfo.latestVersion}`"
+        placement="bottom"
+      >
+        <button
+          class="settings-btn update-btn"
+          type="button"
+          title="发现新版本"
+          aria-label="发现新版本"
+          @mousedown.stop
+          @click="openUpdatePanel"
+        >
+          <span class="update-pulse" :class="{ busy: props.updateInstalling }">
+            <el-icon :size="14"><UploadFilled /></el-icon>
+          </span>
+        </button>
+      </el-tooltip>
     </div>
     <div class="window-actions" @mousedown.stop>
       <el-checkbox
@@ -338,7 +364,7 @@ function hideExitMenu() {
   object-fit: contain;
 }
 
-.titlebar-title span {
+.titlebar-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -361,6 +387,52 @@ function hideExitMenu() {
 .settings-btn:hover {
   color: var(--el-text-color-primary);
   background: var(--el-fill-color-light);
+}
+
+.update-btn {
+  color: var(--el-color-warning);
+}
+
+.update-btn:hover {
+  color: #ffffff;
+  background: var(--el-color-warning);
+}
+
+.update-pulse {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+}
+
+.update-pulse::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border: 1px solid color-mix(in srgb, var(--el-color-warning) 50%, transparent);
+  border-radius: 999px;
+  opacity: 0;
+  animation: update-pulse-ring 1.8s ease-out infinite;
+}
+
+.update-pulse.busy::after {
+  animation-duration: 1s;
+}
+
+@keyframes update-pulse-ring {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.65;
+  }
+
+  70% {
+    transform: scale(1.18);
+    opacity: 0;
+  }
+
+  100% {
+    transform: scale(1.18);
+    opacity: 0;
+  }
 }
 
 .hotkey-popover-panel {

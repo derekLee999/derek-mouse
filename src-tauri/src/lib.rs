@@ -12,6 +12,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
+    time::Duration,
 };
 
 use clicker::{ClickerConfig, ClickerRuntime};
@@ -26,13 +27,22 @@ use recorder::{
     RecorderRuntime, RenameRecordingRequest, SaveEditedRecordingRequest,
     UpdateRecordingLoopPlaybackRequest, UpdateRecordingPlaybackSpeedRequest,
 };
+use reqwest::header::{ACCEPT, USER_AGENT};
+use semver::Version;
 use tauri::{Emitter, Manager};
+use tauri_plugin_updater::UpdaterExt;
 use windows::Win32::{
     Graphics::Gdi::{GetDC, GetPixel, ReleaseDC},
     UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     },
 };
+
+const GITHUB_LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/derekLee999/derek-mouse/releases/latest";
+const GITHUB_UPDATER_ENDPOINT: &str =
+    "https://github.com/derekLee999/derek-mouse/releases/latest/download/latest.json";
+const UPDATER_PUBLIC_KEY: &str = include_str!("../updater.pubkey");
 
 struct AppState {
     active_feature: Mutex<ActiveFeature>,
@@ -146,6 +156,30 @@ struct PixelColor {
     hex: String,
 }
 
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateInfo {
+    current_version: String,
+    available: bool,
+    install_ready: bool,
+    latest_version: Option<String>,
+    latest_tag: Option<String>,
+    notes: Option<String>,
+    published_at: Option<String>,
+    release_url: Option<String>,
+    install_hint: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GithubReleaseInfo {
+    tag_name: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    published_at: Option<String>,
+    html_url: String,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FinishMouseCoordinatePickRequest {
@@ -166,6 +200,50 @@ struct FinishMouseRegionPickRequest {
 #[serde(rename_all = "camelCase")]
 struct FinishMouseColorPickRequest {
     color: String,
+}
+
+fn normalize_release_version(version: &str) -> &str {
+    version.trim().trim_start_matches(['v', 'V'])
+}
+
+async fn fetch_latest_github_release() -> Result<GithubReleaseInfo, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|err| err.to_string())?;
+
+    client
+        .get(GITHUB_LATEST_RELEASE_API)
+        .header(USER_AGENT, "derek-mouse-updater")
+        .header(ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|err| format!("Could not fetch latest GitHub release: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("Could not query latest GitHub release: {err}"))?
+        .json::<GithubReleaseInfo>()
+        .await
+        .map_err(|err| format!("Could not decode latest GitHub release: {err}"))
+}
+
+async fn check_updater_ready(app: &tauri::AppHandle) -> Result<bool, String> {
+    let update_endpoint =
+        reqwest::Url::parse(GITHUB_UPDATER_ENDPOINT).map_err(|err| err.to_string())?;
+
+    let updater = app
+        .updater_builder()
+        .pubkey(UPDATER_PUBLIC_KEY.trim())
+        .timeout(Duration::from_secs(20))
+        .endpoints(vec![update_endpoint])
+        .map_err(|err| err.to_string())?
+        .build()
+        .map_err(|err| err.to_string())?;
+
+    updater
+        .check()
+        .await
+        .map(|update| update.is_some())
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -224,6 +302,81 @@ fn get_global_hotkey_options(
             .load(Ordering::SeqCst),
         auto_hide_on_hotkey: state.auto_hide_on_hotkey.load(Ordering::SeqCst),
     })
+}
+
+#[tauri::command]
+async fn check_app_update(app: tauri::AppHandle) -> Result<AppUpdateInfo, String> {
+    let current_version = app.package_info().version.to_string();
+    let release = fetch_latest_github_release().await?;
+    let current = Version::parse(&current_version).map_err(|err| err.to_string())?;
+    let latest_version = normalize_release_version(&release.tag_name).to_string();
+    let latest = Version::parse(&latest_version)
+        .map_err(|err| format!("Invalid GitHub release tag '{}': {err}", release.tag_name))?;
+    let available = latest > current;
+
+    let mut install_ready = false;
+    let mut install_hint = None;
+
+    if available {
+        match check_updater_ready(&app).await {
+            Ok(true) => {
+                install_ready = true;
+            }
+            Ok(false) => {
+                install_hint = Some(
+                    "已检测到新版本，但当前 Release 尚未提供可安装的 updater 清单。".to_string(),
+                );
+            }
+            Err(error) => {
+                install_hint = Some(format!("自动更新资源不可用：{error}"));
+            }
+        }
+    }
+
+    Ok(AppUpdateInfo {
+        current_version,
+        available,
+        install_ready,
+        latest_version: Some(latest_version),
+        latest_tag: Some(release.tag_name),
+        notes: if release.body.trim().is_empty() {
+            None
+        } else {
+            Some(release.body)
+        },
+        published_at: release.published_at,
+        release_url: Some(release.html_url),
+        install_hint,
+    })
+}
+
+#[tauri::command]
+async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
+    let update_endpoint =
+        reqwest::Url::parse(GITHUB_UPDATER_ENDPOINT).map_err(|err| err.to_string())?;
+
+    let updater = app
+        .updater_builder()
+        .pubkey(UPDATER_PUBLIC_KEY.trim())
+        .timeout(Duration::from_secs(30))
+        .endpoints(vec![update_endpoint])
+        .map_err(|err| err.to_string())?
+        .build()
+        .map_err(|err| err.to_string())?;
+
+    let Some(update) = updater.check().await.map_err(|err| err.to_string())? else {
+        return Err("当前没有可安装的新版本。".to_string());
+    };
+
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|err| err.to_string())?;
+
+    #[cfg(not(target_os = "windows"))]
+    app.restart();
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -775,6 +928,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().pubkey(UPDATER_PUBLIC_KEY.trim()).build())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             tray::init(&app_handle)?;
@@ -791,6 +945,8 @@ pub fn run() {
             update_hotkey_config,
             get_global_hotkey_options,
             update_global_hotkey_options,
+            check_app_update,
+            install_app_update,
             get_recorder_hotkey_config,
             update_recorder_hotkey_config,
             start_clicker,

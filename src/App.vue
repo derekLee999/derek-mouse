@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { KnifeFork, Mouse, VideoCamera } from "@element-plus/icons-vue";
 import TitleBar from "./components/TitleBar.vue";
 import ClickerPanel from "./features/clicker/ClickerPanel.vue";
@@ -9,7 +11,7 @@ import MouseMacroEditorWindow from "./features/mouse-macro/MouseMacroEditorWindo
 import MouseMacroPanel from "./features/mouse-macro/MouseMacroPanel.vue";
 import RecordingEditorWindow from "./features/recorder/RecordingEditorWindow.vue";
 import RecorderPanel from "./features/recorder/RecorderPanel.vue";
-import { hotkeyText, type HotkeyConfig } from "./types";
+import { hotkeyText, type AppUpdateInfo, type HotkeyConfig } from "./types";
 
 type ActiveTab = "clicker" | "recorder" | "mouse-macro";
 
@@ -20,12 +22,23 @@ const isCoordinatePicker = view === "coordinate-picker";
 const isSubWindow = isRecordingEditor || isMouseMacroEditor || isCoordinatePicker;
 const activeTab = ref<ActiveTab>("clicker");
 const recorderBusy = ref(false);
+const updateInfo = ref<AppUpdateInfo | null>(null);
+const updateDialogVisible = ref(false);
+const checkingUpdate = ref(false);
+const installingUpdate = ref(false);
 const globalHotkey = ref<HotkeyConfig>({
   ctrl: false,
   alt: false,
   key: "F8",
 });
 const displayGlobalHotkey = computed(() => hotkeyText(globalHotkey.value));
+const formattedUpdateNotes = computed(() => {
+  const notes = updateInfo.value?.notes?.trim();
+  return notes?.length ? notes : "暂无更新说明。";
+});
+const latestUpdateLabel = computed(
+  () => updateInfo.value?.latestTag ?? updateInfo.value?.latestVersion ?? "",
+);
 
 watch(
   activeTab,
@@ -39,6 +52,7 @@ watch(
 onMounted(() => {
   if (isSubWindow) return;
   window.addEventListener("keydown", handleWindowKeydown);
+  void checkForAppUpdate(true);
 });
 
 onBeforeUnmount(() => {
@@ -56,6 +70,76 @@ function handleWindowKeydown(event: KeyboardEvent) {
   const currentIndex = tabs.indexOf(activeTab.value);
   activeTab.value = tabs[(currentIndex + 1) % tabs.length];
 }
+
+async function checkForAppUpdate(promptOnAvailable = false) {
+  if (checkingUpdate.value || isSubWindow) return;
+
+  checkingUpdate.value = true;
+  try {
+    const nextInfo = await invoke<AppUpdateInfo>("check_app_update");
+    updateInfo.value = nextInfo;
+    if (promptOnAvailable && nextInfo.available) {
+      updateDialogVisible.value = true;
+    }
+  } catch (error) {
+    if (!promptOnAvailable) {
+      ElMessage.error(String(error));
+    }
+  } finally {
+    checkingUpdate.value = false;
+  }
+}
+
+function openUpdateDialog() {
+  if (updateInfo.value?.available) {
+    updateDialogVisible.value = true;
+  } else {
+    void checkForAppUpdate(false);
+  }
+}
+
+async function installLatestUpdate() {
+  if (!updateInfo.value?.available || installingUpdate.value) return;
+
+  if (!updateInfo.value.installReady) {
+    if (updateInfo.value.releaseUrl) {
+      await openUrl(updateInfo.value.releaseUrl);
+    } else {
+      ElMessage.warning(updateInfo.value.installHint ?? "当前无法直接安装该更新。");
+    }
+    return;
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `将下载并安装 ${latestUpdateLabel.value}，安装开始后应用可能会自动退出。`,
+      "安装更新",
+      {
+        confirmButtonText: "立即安装",
+        cancelButtonText: "稍后",
+        type: "warning",
+      },
+    );
+  } catch {
+    return;
+  }
+
+  installingUpdate.value = true;
+  try {
+    await invoke("install_app_update");
+    ElMessage.success("更新安装已开始。");
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    installingUpdate.value = false;
+  }
+}
+
+async function openReleasePage() {
+  if (updateInfo.value?.releaseUrl) {
+    await openUrl(updateInfo.value.releaseUrl);
+  }
+}
 </script>
 
 <template>
@@ -63,7 +147,13 @@ function handleWindowKeydown(event: KeyboardEvent) {
   <MouseMacroEditorWindow v-else-if="isMouseMacroEditor" />
   <CoordinatePickerWindow v-else-if="isCoordinatePicker" />
   <main v-else class="app-shell">
-    <TitleBar v-model="globalHotkey" :hotkey-disabled="activeTab === 'recorder' && recorderBusy" />
+    <TitleBar
+      v-model="globalHotkey"
+      :hotkey-disabled="activeTab === 'recorder' && recorderBusy"
+      :update-info="updateInfo"
+      :update-installing="installingUpdate"
+      @open-update="openUpdateDialog"
+    />
 
     <section class="workspace-tabs-shell">
       <el-tabs v-model="activeTab" class="workspace-tabs">
@@ -105,6 +195,60 @@ function handleWindowKeydown(event: KeyboardEvent) {
         <span class="workspace-hotkey-value">{{ displayGlobalHotkey }}</span>
       </div>
     </section>
+
+    <el-dialog
+      v-model="updateDialogVisible"
+      width="460px"
+      align-center
+      append-to-body
+      title="发现新版本"
+    >
+      <div v-if="updateInfo?.available" class="update-dialog">
+        <div class="update-summary">
+          <div class="update-version-row">
+            <span class="update-version-label">当前版本</span>
+            <b>{{ updateInfo.currentVersion }}</b>
+          </div>
+          <div class="update-version-row">
+            <span class="update-version-label">最新版本</span>
+            <b>{{ latestUpdateLabel }}</b>
+          </div>
+          <div v-if="updateInfo.publishedAt" class="update-version-row">
+            <span class="update-version-label">发布时间</span>
+            <span>{{ updateInfo.publishedAt }}</span>
+          </div>
+        </div>
+
+        <div v-if="updateInfo.installHint" class="update-hint">
+          {{ updateInfo.installHint }}
+        </div>
+
+        <div class="update-notes">
+          <div class="update-notes-title">更新说明</div>
+          <pre class="update-notes-content">{{ formattedUpdateNotes }}</pre>
+        </div>
+      </div>
+      <template #footer>
+        <div class="update-actions">
+          <el-button @click="updateDialogVisible = false">稍后</el-button>
+          <el-button
+            v-if="updateInfo?.releaseUrl"
+            plain
+            @click="openReleasePage"
+          >
+            查看发布页
+          </el-button>
+          <el-button
+            v-if="updateInfo?.installReady"
+            type="primary"
+            :loading="installingUpdate"
+            @click="installLatestUpdate"
+          >
+            立即安装
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </main>
 </template>
 
@@ -217,6 +361,76 @@ input {
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
+}
+
+.update-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.update-summary {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+}
+
+.update-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.update-version-label {
+  color: var(--el-text-color-secondary);
+  font-weight: 600;
+}
+
+.update-hint {
+  padding: 9px 12px;
+  color: var(--el-color-warning-dark-2);
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--el-color-warning-light-9);
+  border: 1px solid var(--el-color-warning-light-5);
+  border-radius: 8px;
+}
+
+.update-notes {
+  display: grid;
+  gap: 8px;
+}
+
+.update-notes-title {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.update-notes-content {
+  max-height: 220px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  color: var(--el-text-color-regular);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  background: var(--el-fill-color-blank);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+}
+
+.update-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 @media (max-width: 1120px) {

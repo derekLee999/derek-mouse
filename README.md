@@ -104,6 +104,8 @@
 - 自定义无边框窗口
 - 浅色 / 深色 / 跟随系统
 - 窗口置顶
+- 启动时自动检查 GitHub Release 新版本
+- 检测到新版本后，主窗口标题栏会出现更新入口并提示安装
 - 关闭按钮可配置为：
   - 隐藏窗口
   - 退出程序
@@ -115,7 +117,6 @@
   - 录制待命
 - 托盘左键显示主窗口
 - 托盘菜单提供“退出程序”
-- 全局热键触发时支持系统通知
 - 单实例运行，重复启动会自动聚焦已有窗口
 
 ## 热键规则
@@ -262,11 +263,28 @@ npm run build
 npm run tauri:build
 ```
 
+如果要发布支持自动更新的版本，还需要在构建前提供 Tauri updater 签名私钥。当前项目默认读取官方约定环境变量，例如：
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH="$env:USERPROFILE\.tauri\derek-mouse-updater.key"
+```
+
+自动更新以 GitHub Release 为来源，运行时会检查：
+
+- 最新 Release 的 `tag`，例如 `v0.1.4`
+- `latest/download/latest.json` updater 清单
+
+发布新版本时，除了安装包本体，还需要把 Tauri 生成的 updater 产物一起上传到对应 Release。
+
 当前 Tauri 配置使用 `NSIS` 作为打包目标，产物一般位于：
 
 ```text
 src-tauri\target\release\bundle\nsis\
 ```
+
+如果要按固定流程发布带自动更新的新版本，请同时参考：
+
+- [RELEASE.md](./RELEASE.md)
 
 ## 使用说明
 
