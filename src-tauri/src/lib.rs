@@ -20,7 +20,7 @@ use config::{load_config, save_config, AppConfig};
 use input::{listen, ActiveFeature, Event, HotkeyConfig};
 use mouse_macro::{
     CaptureImageResult, CreateMacroRequest, FindColorRequest, FindColorResult, FindImageRegion,
-    FindImageRequest, FindImageResult, MacroDetail, MouseMacroRuntime,
+    FindImageRequest, FindImageResult, MacroDetail, MouseMacroRuntime, RenameMacroRequest,
     UpdateMacroLoopPlaybackRequest, UpdateMacroPlaybackSpeedRequest, UpdateMacroRequest,
 };
 use recorder::{
@@ -561,6 +561,14 @@ fn update_mouse_macro(
 }
 
 #[tauri::command]
+fn rename_mouse_macro(
+    request: RenameMacroRequest,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<mouse_macro::MacroState, String> {
+    state.mouse_macro.rename_macro(request)
+}
+
+#[tauri::command]
 fn select_mouse_macro(
     id: u64,
     state: tauri::State<'_, Arc<AppState>>,
@@ -967,6 +975,7 @@ pub fn run() {
             get_mouse_macro_detail,
             create_mouse_macro,
             update_mouse_macro,
+            rename_mouse_macro,
             select_mouse_macro,
             delete_mouse_macro,
             update_mouse_macro_playback_speed,

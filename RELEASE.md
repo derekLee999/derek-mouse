@@ -109,8 +109,9 @@ $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD="你的密码"
 脚本会做这些事：
 
 - 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 的版本号
-- 设置 `TAURI_SIGNING_PRIVATE_KEY_PATH`
+- 设置 `TAURI_SIGNING_PRIVATE_KEY`
 - 执行 `npm run tauri:build`
+- 自动生成 `latest.json`
 - 输出建议上传到 GitHub Release 的文件路径
 
 4. 检查改动并提交代码。
@@ -125,6 +126,32 @@ git push origin v0.1.4
 6. 在 GitHub 创建 `v0.1.4` Release。
 7. 上传脚本输出的产物。
 
+### 可选：直接由脚本创建 GitHub Release
+
+如果你已经：
+
+- 提交了代码
+- 推送了 `main`
+- 推送了 `v0.1.4` tag
+
+那么可以直接让脚本创建 Release：
+
+```powershell
+.\scripts\release.ps1 -Version 0.1.4 -SkipBuild -Publish -ReleaseNotes "这里写更新说明"
+```
+
+如果更新说明更长，推荐写到文件里：
+
+```powershell
+.\scripts\release.ps1 -Version 0.1.4 -SkipBuild -Publish -NotesFile .\release-notes.md
+```
+
+如果想先创建草稿 Release：
+
+```powershell
+.\scripts\release.ps1 -Version 0.1.4 -SkipBuild -Publish -Draft -NotesFile .\release-notes.md
+```
+
 ## 必须上传的 Release 产物
 
 当前项目只打 `NSIS`，所以至少要上传：
@@ -133,7 +160,7 @@ git push origin v0.1.4
 - 对应的 `.exe.sig`
 - `latest.json`
 
-这些文件会由 Tauri 在构建时生成并签名。脚本结束时会把路径列出来。
+这些文件会由 Tauri 在构建时生成并签名。脚本结束时会把路径列出来；新脚本也会自动生成 `latest.json`。
 
 ## 版本命名规则
 
@@ -230,8 +257,7 @@ C:\Users\同事\.tauri\derek-mouse-updater.key
 1. 你维护唯一正式 updater 私钥
 2. 发版前运行 `.\scripts\release.ps1 -Version x.y.z`
 3. 提交代码
-4. 打 `vX.Y.Z` tag
-5. 创建 GitHub Release
-6. 上传脚本列出的产物
+4. 打 `vX.Y.Z` tag 并推送
+5. 运行 `.\scripts\release.ps1 -Version x.y.z -SkipBuild -Publish -NotesFile .\release-notes.md`
 
 如果以后发版频率上来了，再迁移到 CI。

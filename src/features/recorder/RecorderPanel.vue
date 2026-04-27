@@ -163,6 +163,7 @@ function handleRecordingCheck(recording: RecordingSummary, checked: string | num
 
 async function beginRename(recording: RecordingSummary) {
   if (busy.value) return;
+  closeFloatingMenus();
   editingId.value = recording.id;
   editingName.value = recording.name;
   await nextTick();
@@ -255,8 +256,13 @@ async function handleMenuEdit() {
   const recording = recordingMenu.value.recording;
   closeRecordingMenu();
   if (!recording || busy.value) return;
+  await openEditWindow(recording.id);
+}
 
-  const label = `recording-editor-${recording.id}`;
+async function openEditWindow(recordingId: number) {
+  if (busy.value) return;
+
+  const label = `recording-editor-${recordingId}`;
   const existing = await WebviewWindow.getByLabel(label);
   if (existing) {
     await existing.setFocus();
@@ -273,7 +279,7 @@ async function handleMenuEdit() {
   };
 
   const editor = new WebviewWindow(label, {
-    url: `/index.html?view=recording-editor&id=${recording.id}`,
+    url: `/index.html?view=recording-editor&id=${recordingId}`,
     title: "编辑",
     width: 880,
     height: 806,
@@ -298,6 +304,23 @@ async function handleMenuEdit() {
     await restoreMainWindow();
     ElMessage.error(String(event.payload));
   });
+}
+
+async function handleRecordingDoubleClick(recording: RecordingSummary, event: MouseEvent) {
+  if (busy.value || editingId.value === recording.id) return;
+
+  const target = event.target as HTMLElement | null;
+  if (
+    target?.closest(".rename-trigger") ||
+    target?.closest(".recording-tags") ||
+    target?.closest(".el-checkbox") ||
+    target?.closest(".el-input")
+  ) {
+    return;
+  }
+
+  await selectRecording(recording.id);
+  await openEditWindow(recording.id);
 }
 
 function formatSpeed(speed: number) {
@@ -486,6 +509,7 @@ function formatTime(timestamp: number) {
         class="recording-item"
         :class="{ active: recording.id === state.selectedId, disabled: busy }"
         @click="selectRecording(recording.id)"
+        @dblclick="handleRecordingDoubleClick(recording, $event)"
         @contextmenu="openRecordingMenu($event, recording)"
       >
         <el-checkbox
@@ -502,12 +526,15 @@ function formatTime(timestamp: number) {
             size="small"
             :maxlength="20"
             :disabled="busy"
+            show-word-limit
             @click.stop
             @keydown.enter.stop.prevent="commitRename"
             @blur="commitRename"
           />
           <div v-else class="recording-name-row">
-            <strong @dblclick.stop="beginRename(recording)">{{ recording.name }}</strong>
+            <strong class="rename-trigger" @dblclick.stop="beginRename(recording)">
+              {{ recording.name }}
+            </strong>
             <div
               v-if="recording.id === state.selectedId"
               class="recording-tags"
@@ -710,6 +737,7 @@ function formatTime(timestamp: number) {
 .recording-main > span {
   color: var(--el-text-color-secondary);
   font-size: 12px;
+  user-select: none;
 }
 
 .recording-name-row {

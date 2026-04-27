@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { TauriEvent, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -19,6 +19,9 @@ const state = ref<MouseMacroState>({
   selectedId: null,
   playing: false,
 });
+const editingId = ref<number | null>(null);
+const editingName = ref("");
+const renameInput = ref<any[]>([]);
 const speedMenu = ref<{
   macroId: number | null;
   x: number;
@@ -71,6 +74,42 @@ async function refreshState() {
 async function selectMacro(id: number) {
   if (state.value.playing) return;
   state.value = await invoke<MouseMacroState>("select_mouse_macro", { id });
+}
+
+async function beginRename(macro: MouseMacroSummary) {
+  if (state.value.playing) return;
+
+  closeFloatingMenus();
+  editingId.value = macro.id;
+  editingName.value = macro.name;
+  await nextTick();
+  renameInput.value?.[0]?.focus();
+}
+
+async function commitRename() {
+  if (editingId.value === null || state.value.playing) return;
+
+  const trimmed = editingName.value.trim();
+  if (!trimmed) {
+    ElMessage.warning("方案名称不能为空。");
+    await nextTick();
+    renameInput.value?.[0]?.focus();
+    return;
+  }
+  if (trimmed.length > 20) {
+    ElMessage.warning("方案名称不能超过20个字。");
+    await nextTick();
+    renameInput.value?.[0]?.focus();
+    return;
+  }
+
+  state.value = await invoke<MouseMacroState>("rename_mouse_macro", {
+    request: {
+      id: editingId.value,
+      name: trimmed,
+    },
+  });
+  editingId.value = null;
 }
 
 function getMouseMacroEditorWindowSize() {
@@ -180,6 +219,23 @@ async function handleMenuEdit() {
   const macro = macroMenu.value.macro;
   closeMacroMenu();
   if (!macro || state.value.playing) return;
+  await openEditWindow(macro.id);
+}
+
+async function handleMacroDoubleClick(macro: MouseMacroSummary, event: MouseEvent) {
+  if (state.value.playing || editingId.value === macro.id) return;
+
+  const target = event.target as HTMLElement | null;
+  if (
+    target?.closest(".rename-trigger") ||
+    target?.closest(".macro-tags") ||
+    target?.closest(".el-checkbox") ||
+    target?.closest(".el-input")
+  ) {
+    return;
+  }
+
+  await selectMacro(macro.id);
   await openEditWindow(macro.id);
 }
 
@@ -341,6 +397,7 @@ function formatTime(timestamp: number) {
         class="macro-item"
         :class="{ active: macro.id === state.selectedId, disabled: state.playing }"
         @click="selectMacro(macro.id)"
+        @dblclick="handleMacroDoubleClick(macro, $event)"
         @contextmenu="openMacroMenu($event, macro)"
       >
         <el-checkbox
@@ -350,8 +407,22 @@ function formatTime(timestamp: number) {
           @click.stop
         />
         <div class="macro-main">
-          <div class="macro-name-row">
-            <strong>{{ macro.name }}</strong>
+          <el-input
+            v-if="editingId === macro.id"
+            ref="renameInput"
+            v-model="editingName"
+            size="small"
+            :maxlength="20"
+            :disabled="state.playing"
+            show-word-limit
+            @click.stop
+            @keydown.enter.stop.prevent="commitRename"
+            @blur="commitRename"
+          />
+          <div v-else class="macro-name-row">
+            <strong class="rename-trigger" @dblclick.stop="beginRename(macro)">
+              {{ macro.name }}
+            </strong>
             <div v-if="macro.id === state.selectedId" class="macro-tags" @click.stop>
               <el-tag
                 class="option-tag speed-tag"
@@ -545,6 +616,7 @@ function formatTime(timestamp: number) {
 .macro-main > span {
   color: var(--el-text-color-secondary);
   font-size: 12px;
+  user-select: none;
 }
 
 .macro-name-row {

@@ -6,7 +6,19 @@ param(
 
   [string]$SigningKeyPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
 
+  [string]$Repo = "derekLee999/derek-mouse",
+
+  [string]$ReleaseNotes = "",
+
+  [string]$NotesFile = "",
+
   [switch]$SkipBuild,
+
+  [switch]$Publish,
+
+  [switch]$Draft,
+
+  [switch]$Prerelease,
 
   [switch]$AllowDirty
 )
@@ -79,12 +91,93 @@ function Write-Utf8NoBomFile {
   [System.IO.File]::WriteAllText($Path, $Content, $Encoding)
 }
 
+function Get-ReleaseNotesText {
+  param(
+    [string]$InlineNotes,
+    [string]$NotesFilePath,
+    [string]$Version
+  )
+
+  if ($NotesFilePath) {
+    if (-not (Test-Path -LiteralPath $NotesFilePath)) {
+      throw "Notes file not found: $NotesFilePath"
+    }
+    return (Get-Content -Raw -LiteralPath $NotesFilePath).Trim()
+  }
+
+  if ($InlineNotes) {
+    return $InlineNotes.Trim()
+  }
+
+  return "Release v$Version"
+}
+
+function Get-SetupExe {
+  param(
+    [string]$NsisDir,
+    [string]$Version
+  )
+
+  $Matches = Get-ChildItem -Path $NsisDir -File -Filter "*_${Version}_x64-setup.exe" | Sort-Object Name
+  if (-not $Matches) {
+    throw "Could not find setup exe for version $Version in $NsisDir"
+  }
+  return $Matches[0]
+}
+
+function New-LatestJson {
+  param(
+    [string]$NsisDir,
+    [string]$Version,
+    [string]$Repo,
+    [string]$NotesText
+  )
+
+  $SetupExe = Get-SetupExe -NsisDir $NsisDir -Version $Version
+  $SigPath = "$($SetupExe.FullName).sig"
+  if (-not (Test-Path -LiteralPath $SigPath)) {
+    throw "Could not find updater signature file: $SigPath"
+  }
+
+  $Signature = (Get-Content -Raw -LiteralPath $SigPath).Trim()
+  $Tag = "v$Version"
+  $LatestJsonPath = Join-Path $NsisDir "latest.json"
+  $Json = [ordered]@{
+    version  = $Version
+    notes    = $NotesText
+    pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    platforms = @{
+      "windows-x86_64" = @{
+        url       = "https://github.com/$Repo/releases/download/$Tag/$($SetupExe.Name)"
+        signature = $Signature
+      }
+    }
+  } | ConvertTo-Json -Depth 6
+
+  Write-Utf8NoBomFile -Path $LatestJsonPath -Content $Json
+  return [pscustomobject]@{
+    SetupExePath   = $SetupExe.FullName
+    SetupSigPath   = $SigPath
+    LatestJsonPath = $LatestJsonPath
+  }
+}
+
+function Ensure-GhAvailable {
+  $Gh = Get-Command gh -ErrorAction SilentlyContinue
+  if (-not $Gh) {
+    throw "GitHub CLI (gh) is not installed or not on PATH."
+  }
+}
+
 Assert-Semver $Version
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $PackageJsonPath = Join-Path $ProjectRoot "package.json"
 $CargoTomlPath = Join-Path $ProjectRoot "src-tauri\Cargo.toml"
 $TauriConfigPath = Join-Path $ProjectRoot "src-tauri\tauri.conf.json"
+$BundleDir = Join-Path $ProjectRoot "src-tauri\target\release\bundle"
+$NsisDir = Join-Path $BundleDir "nsis"
+$Tag = "v$Version"
 
 Push-Location $ProjectRoot
 try {
@@ -108,47 +201,80 @@ try {
   Write-Utf8NoBomFile $TauriConfigPath $TauriConfig
 
   Write-Success "Synced version to package.json, src-tauri/Cargo.toml, and src-tauri/tauri.conf.json -> $Version"
-  Write-Info "Suggested Git tag: v$Version"
+  Write-Info "Suggested Git tag: $Tag"
 
-  if ($SkipBuild) {
+  if (-not $SkipBuild) {
+    if (-not (Test-Path -LiteralPath $SigningKeyPath)) {
+      throw "Updater signing key not found: $SigningKeyPath"
+    }
+
+    $SigningKeyContent = Get-Content -Raw -LiteralPath $SigningKeyPath
+    $env:TAURI_SIGNING_PRIVATE_KEY = $SigningKeyContent.Trim()
+    $env:TAURI_SIGNING_PRIVATE_KEY_PATH = $SigningKeyPath
+    if ($SigningKeyPassword -ne $null) {
+      $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $SigningKeyPassword
+    }
+
+    Write-Info "Running npm run tauri:build"
+    npm run tauri:build
+    if ($LASTEXITCODE -ne 0) {
+      throw "tauri build failed with exit code: $LASTEXITCODE"
+    }
+  }
+  else {
     Write-Info "Build skipped."
-    return
   }
 
-  if (-not (Test-Path -LiteralPath $SigningKeyPath)) {
-    throw "Updater signing key not found: $SigningKeyPath"
+  if (-not (Test-Path -LiteralPath $NsisDir)) {
+    throw "NSIS bundle directory not found: $NsisDir"
   }
 
-  $SigningKeyContent = Get-Content -Raw -LiteralPath $SigningKeyPath
-  $env:TAURI_SIGNING_PRIVATE_KEY = $SigningKeyContent.Trim()
-  $env:TAURI_SIGNING_PRIVATE_KEY_PATH = $SigningKeyPath
-  if ($SigningKeyPassword) {
-    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $SigningKeyPassword
-  }
+  $NotesText = Get-ReleaseNotesText -InlineNotes $ReleaseNotes -NotesFilePath $NotesFile -Version $Version
+  $Artifacts = New-LatestJson -NsisDir $NsisDir -Version $Version -Repo $Repo -NotesText $NotesText
 
-  Write-Info "Running npm run tauri:build"
-  npm run tauri:build
-  if ($LASTEXITCODE -ne 0) {
-    throw "tauri build failed with exit code: $LASTEXITCODE"
-  }
+  Write-Success "Generated latest.json:"
+  Write-Host (" - " + $Artifacts.LatestJsonPath)
+  Write-Success "Suggested assets to upload to GitHub Release:"
+  Write-Host (" - " + $Artifacts.SetupExePath)
+  Write-Host (" - " + $Artifacts.SetupSigPath)
+  Write-Host (" - " + $Artifacts.LatestJsonPath)
 
-  $BundleDir = Join-Path $ProjectRoot "src-tauri\target\release\bundle"
-  $Assets = @()
-  if (Test-Path -LiteralPath $BundleDir) {
-    $Assets += Get-ChildItem -Path $BundleDir -Recurse -File |
-      Where-Object {
-        $_.Name -eq "latest.json" -or
-        $_.Name -like "*.exe" -or
-        $_.Name -like "*.exe.sig" -or
-        $_.Name -like "*.msi" -or
-        $_.Name -like "*.msi.sig"
-      } |
-      Sort-Object FullName
-  }
+  if ($Publish) {
+    Ensure-GhAvailable
 
-  Write-Success "Build finished. Suggested assets to upload to GitHub Release:"
-  foreach ($Asset in $Assets) {
-    Write-Host (" - " + $Asset.FullName)
+    $RemoteTag = git ls-remote --tags origin $Tag
+    if (-not $RemoteTag) {
+      throw "Remote tag $Tag was not found. Push the tag before using -Publish."
+    }
+
+    $NotesTempPath = Join-Path $ProjectRoot ".codex-run\release-$Tag-notes.md"
+    New-Item -ItemType Directory -Force -Path (Split-Path $NotesTempPath) | Out-Null
+    Write-Utf8NoBomFile -Path $NotesTempPath -Content $NotesText
+
+    $Arguments = @(
+      "release", "create", $Tag,
+      $Artifacts.SetupExePath,
+      $Artifacts.SetupSigPath,
+      $Artifacts.LatestJsonPath,
+      "--repo", $Repo,
+      "--title", $Tag,
+      "--notes-file", $NotesTempPath,
+      "--verify-tag"
+    )
+    if ($Draft) {
+      $Arguments += "--draft"
+    }
+    if ($Prerelease) {
+      $Arguments += "--prerelease"
+    }
+
+    Write-Info "Running gh $($Arguments -join ' ')"
+    & gh @Arguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "gh release create failed with exit code: $LASTEXITCODE"
+    }
+
+    Write-Success "GitHub Release created for $Tag"
   }
 }
 finally {

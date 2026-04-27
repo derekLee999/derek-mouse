@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -20,6 +20,9 @@ const currentWindow = getCurrentWindow();
 const loading = ref(true);
 const saving = ref(false);
 const recording = ref<RecordingDetail | null>(null);
+const editingTitle = ref(false);
+const editingTitleName = ref("");
+const titleInput = ref<any>(null);
 const events = ref<RecordingEventSummary[]>([]);
 const eventListRef = ref<HTMLElement | null>(null);
 const selectedEventIndices = ref<Set<number>>(new Set());
@@ -110,6 +113,8 @@ async function loadRecording() {
   try {
     const detail = await invoke<RecordingDetail>("get_recording_detail", { id: recordingId });
     recording.value = detail;
+    editingTitle.value = false;
+    editingTitleName.value = detail.name;
     events.value = detail.events;
     selectedEventIndices.value = new Set();
     removedEventIndices.value = new Set();
@@ -120,6 +125,66 @@ async function loadRecording() {
     await closeWindow();
   } finally {
     loading.value = false;
+  }
+}
+
+async function beginTitleRename() {
+  if (!recording.value || loading.value || saving.value) return;
+
+  closeFloatingMenus();
+  editingTitle.value = true;
+  editingTitleName.value = recording.value.name;
+  await nextTick();
+  titleInput.value?.focus?.();
+}
+
+function cancelTitleRename() {
+  editingTitle.value = false;
+  editingTitleName.value = recording.value?.name ?? "";
+}
+
+async function commitTitleRename() {
+  if (!recording.value || !editingTitle.value || loading.value || saving.value) return;
+
+  const trimmed = editingTitleName.value.trim();
+  if (!trimmed) {
+    ElMessage.warning("方案名称不能为空。");
+    await nextTick();
+    titleInput.value?.focus?.();
+    return;
+  }
+  if (trimmed.length > 20) {
+    ElMessage.warning("方案名称不能超过20个字。");
+    await nextTick();
+    titleInput.value?.focus?.();
+    return;
+  }
+
+  if (trimmed === recording.value.name) {
+    editingTitle.value = false;
+    return;
+  }
+
+  try {
+    const state = await invoke<RecorderState>("rename_recording", {
+      request: {
+        id: recording.value.id,
+        name: trimmed,
+      },
+    });
+    const nextRecording = state.recordings.find((item) => item.id === recording.value?.id);
+    recording.value = {
+      ...recording.value,
+      name: trimmed,
+      updatedAt: nextRecording?.updatedAt ?? recording.value.updatedAt,
+    };
+    editingTitleName.value = trimmed;
+    await emitTo("main", "recorder-state", state);
+    editingTitle.value = false;
+  } catch (error) {
+    ElMessage.error(String(error));
+    await nextTick();
+    titleInput.value?.focus?.();
   }
 }
 
@@ -480,7 +545,22 @@ function formatTime(timestamp: number | undefined) {
 
     <header class="editor-header">
       <div class="recording-title-block">
-        <strong>{{ recording?.name ?? "编辑方案" }}</strong>
+        <el-input
+          v-if="editingTitle"
+          ref="titleInput"
+          v-model="editingTitleName"
+          class="recording-title-input"
+          size="small"
+          :maxlength="20"
+          show-word-limit
+          @click.stop
+          @keydown.enter.stop.prevent="commitTitleRename"
+          @keydown.esc.stop.prevent="cancelTitleRename"
+          @blur="commitTitleRename"
+        />
+        <strong v-else class="recording-title" @click="beginTitleRename">
+          {{ recording?.name ?? "编辑方案" }}
+        </strong>
         <div class="recording-summary">
           <span><b>创建</b>{{ formatTime(recording?.createdAt) }}</span>
           <span v-if="shouldShowUpdatedAt"><b>最后修改</b>{{ formatTime(recording?.updatedAt) }}</span>
@@ -782,6 +862,20 @@ function formatTime(timestamp: number | undefined) {
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.recording-title {
+  cursor: text;
+}
+
+.recording-title-input {
+  flex: 0 1 320px;
+  min-width: 220px;
+  max-width: min(360px, 100%);
+}
+
+.recording-title-input :deep(.el-input__wrapper) {
+  min-height: 32px;
 }
 
 .recording-summary {

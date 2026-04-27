@@ -254,6 +254,13 @@ pub struct UpdateMacroLoopPlaybackRequest {
     value: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameMacroRequest {
+    pub id: u64,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MacroDetail {
@@ -360,6 +367,25 @@ impl MouseMacroRuntime {
         }
 
         *self.selected_id.lock().map_err(|err| err.to_string())? = Some(id);
+        self.make_state()
+    }
+
+    pub fn rename_macro(&self, request: RenameMacroRequest) -> Result<MacroState, String> {
+        if self.playing.load(Ordering::SeqCst) {
+            return Err("Macro playback is running".to_string());
+        }
+
+        let name = normalize_name(&request.name)?;
+        let mut macros = self.macros.lock().map_err(|err| err.to_string())?;
+        let Some(scheme) = macros.iter_mut().find(|item| item.id == request.id) else {
+            return Err("Macro not found".to_string());
+        };
+
+        scheme.name = name;
+        scheme.updated_at = unix_ms();
+        drop(macros);
+
+        self.persist();
         self.make_state()
     }
 
