@@ -133,6 +133,7 @@ fn load_icon(bytes: &'static [u8]) -> tauri::Result<Image<'static>> {
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
+        let _ = window.unminimize();
         let _ = window.set_focus();
     }
 }

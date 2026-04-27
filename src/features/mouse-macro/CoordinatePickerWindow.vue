@@ -301,7 +301,6 @@ body,
   z-index: 2;
   pointer-events: none;
   background: #409EFF;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
 }
 
 .crosshair.horizontal {

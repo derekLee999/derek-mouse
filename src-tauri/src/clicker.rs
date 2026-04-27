@@ -12,8 +12,10 @@ use tauri::{Emitter, Manager};
 
 use crate::{
     input::{
-        button_from_name, simulate, validate_hotkey, Button, Event, EventType, HotkeyConfig, Key,
-        KeyboardTracker,
+        button_from_name, dispatch_background_click, dispatch_ldplayer_click,
+        dispatch_ldplayer_click_via_shell, is_likely_ldplayer_window, is_window,
+        resolve_ldplayer_target, simulate, validate_hotkey, Button, Event, EventType,
+        HotkeyConfig, Key, KeyboardTracker, LdPlayerShellSession, LdPlayerTarget,
     },
     tray::{self, TrayStatus},
 };
@@ -28,6 +30,14 @@ pub struct ClickerConfig {
     pub mode: String,
     pub hold_button: String,
     pub hotkey: HotkeyConfig,
+    #[serde(default)]
+    pub backend_click: bool,
+    #[serde(default)]
+    pub target_window_title: String,
+    #[serde(default)]
+    pub target_client_x: Option<i32>,
+    #[serde(default)]
+    pub target_client_y: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +55,9 @@ pub struct ClickerRuntime {
     injecting_mouse_event: AtomicBool,
     clicked_count: AtomicU64,
     last_mouse_position: Mutex<Option<(f64, f64)>>,
+    target_hwnd: Mutex<Option<isize>>,
+    target_ldplayer: Mutex<Option<LdPlayerTarget>>,
+    ldplayer_shell: Mutex<Option<LdPlayerShellSession>>,
 }
 
 impl Default for ClickerConfig {
@@ -56,6 +69,10 @@ impl Default for ClickerConfig {
             mode: "toggle".to_string(),
             hold_button: "left".to_string(),
             hotkey: HotkeyConfig::default(),
+            backend_click: false,
+            target_window_title: String::new(),
+            target_client_x: None,
+            target_client_y: None,
         }
     }
 }
@@ -70,12 +87,23 @@ impl Default for ClickerRuntime {
             injecting_mouse_event: AtomicBool::new(false),
             clicked_count: AtomicU64::new(0),
             last_mouse_position: Mutex::new(None),
+            target_hwnd: Mutex::new(None),
+            target_ldplayer: Mutex::new(None),
+            ldplayer_shell: Mutex::new(None),
         }
     }
 }
 
 impl ClickerRuntime {
     pub fn from_config(config: ClickerConfig) -> Self {
+        let target_hwnd = resolve_target_hwnd(&config.target_window_title);
+        let target_ldplayer = target_hwnd.and_then(|hwnd| {
+            if is_likely_ldplayer_window(&config.target_window_title) {
+                resolve_ldplayer_target(hwnd, &config.target_window_title)
+            } else {
+                None
+            }
+        });
         Self {
             config: Mutex::new(config),
             running: AtomicBool::new(false),
@@ -84,6 +112,9 @@ impl ClickerRuntime {
             injecting_mouse_event: AtomicBool::new(false),
             clicked_count: AtomicU64::new(0),
             last_mouse_position: Mutex::new(None),
+            target_hwnd: Mutex::new(target_hwnd),
+            target_ldplayer: Mutex::new(target_ldplayer),
+            ldplayer_shell: Mutex::new(None),
         }
     }
 
@@ -103,6 +134,29 @@ impl ClickerRuntime {
 
     pub fn update_config(&self, config: ClickerConfig) -> Result<ClickerState, String> {
         let normalized = normalize_config(config)?;
+        let should_update_hwnd = {
+            let current = self.config.lock().map_err(|err| err.to_string())?;
+            current.backend_click != normalized.backend_click
+                || current.target_window_title != normalized.target_window_title
+        };
+        if should_update_hwnd {
+            let new_hwnd = resolve_target_hwnd(&normalized.target_window_title);
+            if let Ok(mut hwnd) = self.target_hwnd.lock() {
+                *hwnd = new_hwnd;
+            }
+            if let Ok(mut ldplayer) = self.target_ldplayer.lock() {
+                *ldplayer = new_hwnd.and_then(|hwnd| {
+                    if is_likely_ldplayer_window(&normalized.target_window_title) {
+                        resolve_ldplayer_target(hwnd, &normalized.target_window_title)
+                    } else {
+                        None
+                    }
+                });
+            }
+            if let Ok(mut shell) = self.ldplayer_shell.lock() {
+                *shell = None;
+            }
+        }
         *self.config.lock().map_err(|err| err.to_string())? = normalized.clone();
 
         Ok(ClickerState {
@@ -121,6 +175,30 @@ impl ClickerRuntime {
         self.clicked_count.store(0, Ordering::SeqCst);
         self.running.store(true, Ordering::SeqCst);
         tray::set_status(TrayStatus::Running);
+
+        // 启动时重新解析目标窗口句柄（窗口可能已被关闭重开）
+        {
+            let config = self.config.lock().expect("clicker config poisoned").clone();
+            if config.backend_click && !config.target_window_title.is_empty() {
+                let new_hwnd = resolve_target_hwnd(&config.target_window_title);
+                if let Ok(mut hwnd) = self.target_hwnd.lock() {
+                    *hwnd = new_hwnd;
+                }
+                if let Ok(mut ldplayer) = self.target_ldplayer.lock() {
+                    *ldplayer = new_hwnd.and_then(|hwnd| {
+                        if is_likely_ldplayer_window(&config.target_window_title) {
+                            resolve_ldplayer_target(hwnd, &config.target_window_title)
+                        } else {
+                            None
+                        }
+                    });
+                }
+                if let Ok(mut shell) = self.ldplayer_shell.lock() {
+                    *shell = None;
+                }
+            }
+        }
+
         ClickerState {
             config: self.config.lock().expect("clicker config poisoned").clone(),
             running: true,
@@ -189,21 +267,97 @@ impl ClickerRuntime {
                 if let Some(button) = button_from_name(&config.click_button) {
                     runtime.injecting_mouse_event.store(true, Ordering::SeqCst);
 
-                    // In hold mode with right-button trigger and left-button auto-click,
-                    // browsers may keep right-click context behavior active and swallow
-                    // synthesized left clicks. Releasing right button first improves
-                    // compatibility on web pages while keeping internal hold state.
-                    if config.mode == "hold"
-                        && config.hold_button == "right"
-                        && config.click_button == "left"
-                    {
-                        let _ = simulate(&EventType::ButtonRelease(Button::Right));
-                        thread::sleep(Duration::from_millis(1));
-                    }
+                    if config.backend_click {
+                        // 后台点击：命中最深子窗口，并沿祖先链补发鼠标移动后再发送点击
+                        let hwnd = runtime.target_hwnd.lock().ok().and_then(|h| *h);
+                        if let Some(hwnd) = hwnd {
+                            if is_window(hwnd) {
+                                let Some(target_client_x) = config.target_client_x else {
+                                    runtime.injecting_mouse_event.store(false, Ordering::SeqCst);
+                                    thread::sleep(interval);
+                                    continue;
+                                };
+                                let Some(target_client_y) = config.target_client_y else {
+                                    runtime.injecting_mouse_event.store(false, Ordering::SeqCst);
+                                    thread::sleep(interval);
+                                    continue;
+                                };
+                                let ldplayer_target = runtime
+                                    .target_ldplayer
+                                    .lock()
+                                    .ok()
+                                    .and_then(|target| target.clone());
+                                let dispatch_result = if let Some(target) = ldplayer_target {
+                                    let shell_result = if let Ok(mut shell) = runtime.ldplayer_shell.lock() {
+                                        dispatch_ldplayer_click_via_shell(
+                                            &mut shell,
+                                            &target,
+                                            &config.click_button,
+                                            hwnd,
+                                            target_client_x,
+                                            target_client_y,
+                                        )
+                                    } else {
+                                        Err("Failed to lock LDPlayer shell session".to_string())
+                                    };
 
-                    let _ = simulate(&EventType::ButtonPress(button));
-                    thread::sleep(Duration::from_millis(2));
-                    let _ = simulate(&EventType::ButtonRelease(button));
+                                    shell_result
+                                        .or_else(|_| {
+                                            dispatch_ldplayer_click(
+                                                &target,
+                                                hwnd,
+                                                &config.click_button,
+                                                target_client_x,
+                                                target_client_y,
+                                            )
+                                        })
+                                        .or_else(|_| {
+                                            dispatch_background_click(
+                                                hwnd,
+                                                &config.click_button,
+                                                target_client_x,
+                                                target_client_y,
+                                            )
+                                        })
+                                } else {
+                                    dispatch_background_click(
+                                        hwnd,
+                                        &config.click_button,
+                                        target_client_x,
+                                        target_client_y,
+                                    )
+                                };
+                                let _ = dispatch_result;
+                            } else {
+                                // 目标窗口已关闭，自动停止连点
+                                runtime.running.store(false, Ordering::SeqCst);
+                                runtime.mouse_held.store(false, Ordering::SeqCst);
+                                runtime.clicked_count.store(0, Ordering::SeqCst);
+                                tray::set_status(TrayStatus::Stopped);
+                                let _ = app.emit("clicker-status", false);
+                                was_clicking = false;
+                                next_click_at = Instant::now();
+                                runtime.injecting_mouse_event.store(false, Ordering::SeqCst);
+                                continue;
+                            }
+                        }
+                    } else {
+                        // In hold mode with right-button trigger and left-button auto-click,
+                        // browsers may keep right-click context behavior active and swallow
+                        // synthesized left clicks. Releasing right button first improves
+                        // compatibility on web pages while keeping internal hold state.
+                        if config.mode == "hold"
+                            && config.hold_button == "right"
+                            && config.click_button == "left"
+                        {
+                            let _ = simulate(&EventType::ButtonRelease(Button::Right));
+                            thread::sleep(Duration::from_millis(1));
+                        }
+
+                        let _ = simulate(&EventType::ButtonPress(button));
+                        thread::sleep(Duration::from_millis(2));
+                        let _ = simulate(&EventType::ButtonRelease(button));
+                    }
                     runtime.injecting_mouse_event.store(false, Ordering::SeqCst);
 
                     let total_clicks = runtime.clicked_count.fetch_add(1, Ordering::SeqCst) + 1;
@@ -447,12 +601,40 @@ fn normalize_config(mut config: ClickerConfig) -> Result<ClickerConfig, String> 
 
     config.click_button = config.click_button.to_lowercase();
     config.hold_button = config.hold_button.to_lowercase();
+    config.target_window_title = config.target_window_title.trim().to_string();
 
     if config.mode == "hold" && config.hold_button == "middle" {
         config.hold_button = "left".to_string();
     }
 
+    if config.target_window_title.is_empty() {
+        config.target_client_x = None;
+        config.target_client_y = None;
+    }
+
+    if config.target_client_x.is_none() || config.target_client_y.is_none() {
+        config.target_client_x = None;
+        config.target_client_y = None;
+    }
+
     validate_hotkey(&mut config.hotkey)?;
 
     Ok(config)
+}
+
+
+fn resolve_target_hwnd(title: &str) -> Option<isize> {
+    if title.is_empty() {
+        return None;
+    }
+    let windows = crate::input::enum_visible_windows();
+    // 优先精确匹配
+    if let Some((_, hwnd)) = windows.iter().find(|(t, _)| t == title) {
+        return Some(*hwnd);
+    }
+    // 精确匹配失败时尝试包含匹配（网页标题可能变化）
+    if let Some((_, hwnd)) = windows.iter().find(|(t, _)| t.contains(title) || title.contains(t)) {
+        return Some(*hwnd);
+    }
+    None
 }

@@ -296,7 +296,6 @@ impl MouseMacroRuntime {
     pub fn new() -> Self {
         let (macros, next_id) = load_macros();
         let first_id = macros.first().map(|item| item.id);
-        let ocr = OcrEngine::new().ok().map(Arc::new);
         Self {
             macros: Mutex::new(macros),
             selected_id: Mutex::new(first_id),
@@ -305,7 +304,7 @@ impl MouseMacroRuntime {
             injecting_event: Arc::new(AtomicBool::new(false)),
             suppress_playback_hotkey_release: AtomicBool::new(false),
             next_id: Mutex::new(next_id),
-            ocr_engine: Arc::new(Mutex::new(ocr)),
+            ocr_engine: Arc::new(Mutex::new(None)),
         }
     }
 

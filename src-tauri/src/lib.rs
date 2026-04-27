@@ -110,6 +110,14 @@ struct PickedCoordinate {
     y: i32,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PickedWindowTarget {
+    title: String,
+    client_x: i32,
+    client_y: i32,
+}
+
 #[derive(Debug, serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct PickedRegion {
@@ -426,6 +434,39 @@ fn stop_clicker(state: tauri::State<'_, Arc<AppState>>) -> Result<clicker::Click
     let result = state.clicker.stop();
     state.sync_tray_status();
     Ok(result)
+}
+
+#[tauri::command]
+fn enum_visible_windows() -> Vec<(String, isize)> {
+    input::enum_visible_windows()
+}
+
+#[tauri::command]
+fn pick_window_at_cursor(x: Option<i32>, y: Option<i32>) -> Result<PickedWindowTarget, String> {
+    let pos = if let (Some(x), Some(y)) = (x, y) {
+        (x, y)
+    } else {
+        input::get_cursor_pos().ok_or("Failed to get cursor position")?
+    };
+    let hwnd = input::window_from_point(pos.0, pos.1).ok_or("No window found at cursor")?;
+
+    // 始终使用根窗口：子窗口可能无法被 EnumWindows 枚举到，
+    // 且根窗口更稳定（关闭重开后仍可通过标题重新查找）
+    let root = input::get_root_window(hwnd);
+    let title = input::get_window_title(root);
+
+    if title.is_empty() {
+        return Err("无法获取窗口标题".to_string());
+    }
+
+    let (client_x, client_y) = input::screen_to_client(root, pos.0, pos.1)
+        .ok_or("无法计算目标窗口坐标".to_string())?;
+
+    Ok(PickedWindowTarget {
+        title,
+        client_x,
+        client_y,
+    })
 }
 
 #[tauri::command]
@@ -959,6 +1000,8 @@ pub fn run() {
             update_recorder_hotkey_config,
             start_clicker,
             stop_clicker,
+            enum_visible_windows,
+            pick_window_at_cursor,
             get_recorder_state,
             get_recording_detail,
             start_recording,

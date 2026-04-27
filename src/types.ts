@@ -31,6 +31,10 @@ export type ClickerConfig = {
   mode: ClickMode;
   holdButton: MouseButton;
   hotkey: HotkeyConfig;
+  backendClick: boolean;
+  targetWindowTitle: string;
+  targetClientX: number | null;
+  targetClientY: number | null;
 };
 
 export type ClickerState = {

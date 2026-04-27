@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, TauriEvent, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { WebviewWindow, type WebviewWindow as WebviewWindowType } from "@tauri-apps/api/webviewWindow";
 import { QuestionFilled } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import {
@@ -14,6 +16,8 @@ import {
 const props = defineProps<{
   hotkey: HotkeyConfig;
 }>();
+
+const currentWindow = getCurrentWindow();
 
 const modeOptions = [
   { label: "热键切换连点", value: "toggle" },
@@ -28,6 +32,9 @@ const holdButtonOptions = [
 const running = ref(false);
 const errorMessage = ref("");
 const initialized = ref(false);
+const pickingWindow = ref(false);
+let unlistenCoordinate: UnlistenFn | undefined;
+let pickerWindow: WebviewWindowType | null = null;
 
 const config = reactive<ClickerConfig>({
   clickButton: "left",
@@ -40,6 +47,10 @@ const config = reactive<ClickerConfig>({
     alt: false,
     key: "F8",
   },
+  backendClick: false,
+  targetWindowTitle: "",
+  targetClientX: null,
+  targetClientY: null,
 });
 
 let unlistenStatus: UnlistenFn | undefined;
@@ -54,6 +65,10 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unlistenStatus?.();
+  unlistenCoordinate?.();
+  if (pickingWindow.value) {
+    cancelPickWindow();
+  }
 });
 
 watch(
@@ -101,6 +116,10 @@ function buildConfigPayload(): ClickerConfig {
       alt: props.hotkey.alt,
       key: props.hotkey.key,
     },
+    backendClick: config.backendClick,
+    targetWindowTitle: config.targetWindowTitle,
+    targetClientX: config.targetClientX,
+    targetClientY: config.targetClientY,
   };
 }
 
@@ -138,6 +157,83 @@ function handleModeChange() {
   if (config.mode === "hold" && config.holdButton === "middle") {
     config.holdButton = "left";
   }
+}
+
+async function startPickWindow() {
+  if (pickingWindow.value) return;
+  pickingWindow.value = true;
+
+  try {
+    const snapshot = await invoke<{ left: number; top: number; width: number; height: number }>(
+      "start_mouse_coordinate_pick",
+      { windowLabel: currentWindow.label }
+    );
+
+    unlistenCoordinate = await listen<{ x: number; y: number }>("mouse-coordinate-picked", (event) => {
+      void finishWindowPick(event.payload.x, event.payload.y);
+    });
+
+    const label = `coordinate-picker-window-${Date.now()}`;
+    pickerWindow = new WebviewWindow(label, {
+      url: `/index.html?view=coordinate-picker&mode=coordinate`,
+      title: "选取窗口",
+      x: snapshot.left,
+      y: snapshot.top,
+      width: snapshot.width,
+      height: snapshot.height,
+      decorations: false,
+      resizable: false,
+      transparent: true,
+      shadow: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      focus: true,
+    });
+
+    pickerWindow.once(TauriEvent.WINDOW_DESTROYED, () => {
+      pickerWindow = null;
+      if (pickingWindow.value) {
+        cancelPickWindow();
+      }
+    });
+  } catch (error) {
+    pickingWindow.value = false;
+    ElMessage.error(String(error));
+  }
+}
+
+async function finishWindowPick(x: number, y: number) {
+  unlistenCoordinate?.();
+  // 先关闭 coordinate picker 覆盖窗口，避免 WindowFromPoint 取到它自身
+  try {
+    await pickerWindow?.close();
+  } catch {}
+  pickerWindow = null;
+  pickingWindow.value = false;
+  try {
+    const result = await invoke<{ title: string; clientX: number; clientY: number }>("pick_window_at_cursor", {
+      x,
+      y,
+    });
+    config.targetWindowTitle = result.title;
+    config.targetClientX = result.clientX;
+    config.targetClientY = result.clientY;
+    ElMessage.success(`已选取窗口：${result.title}`);
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+function cancelPickWindow() {
+  unlistenCoordinate?.();
+  try {
+    pickerWindow?.close();
+  } catch {}
+  pickerWindow = null;
+  pickingWindow.value = false;
+  try {
+    invoke("cancel_mouse_coordinate_pick");
+  } catch {}
 }
 </script>
 
@@ -213,6 +309,41 @@ function handleModeChange() {
           :disabled="running"
         />
       </el-form-item>
+
+      <el-form-item>
+        <template #label>
+          <span>后台点击</span>
+        </template>
+        <div class="backend-click-row">
+          <el-checkbox v-model="config.backendClick" :disabled="running">
+            向目标窗口发送消息（不移动鼠标）
+          </el-checkbox>
+          <el-tooltip placement="top">
+            <template #content>目前仅支持浏览器和雷电模拟器。其它应用未做验证！ </template>
+            <el-icon class="mode-help-icon" :size="14"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </div>
+      </el-form-item>
+
+      <el-form-item v-if="config.backendClick">
+        <template #label>
+          <span>目标窗口</span>
+        </template>
+        <div class="target-window-row">
+          <span v-if="config.targetWindowTitle" class="target-window-title" :title="config.targetWindowTitle">
+            {{ config.targetWindowTitle }}
+          </span>
+          <span v-else class="target-window-placeholder">未选择</span>
+          <el-button
+            size="small"
+            :type="pickingWindow ? 'primary' : 'default'"
+            :disabled="running"
+            @click="startPickWindow"
+          >
+            {{ pickingWindow ? "点击确认 " : "选取窗口" }}
+          </el-button>
+        </div>
+      </el-form-item>
     </el-form>
 
     <el-alert
@@ -285,6 +416,34 @@ function handleModeChange() {
 .interval-row span {
   color: var(--el-text-color-regular);
   font-weight: 600;
+}
+
+.backend-click-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.target-window-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.target-window-title {
+  min-width: 0;
+  max-width: 25ch;
+  overflow: hidden;
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-window-placeholder {
+  color: var(--el-text-color-placeholder);
+  font-size: 13px;
 }
 
 .status-strip {

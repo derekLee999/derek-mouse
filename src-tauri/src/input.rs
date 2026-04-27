@@ -1,8 +1,17 @@
-use std::{fmt, mem::size_of, sync::Mutex, time::SystemTime};
+use std::{
+    env, fmt, fs,
+    io::Write,
+    mem::size_of,
+    os::windows::process::CommandExt,
+    path::{Path, PathBuf},
+    process::{Child, ChildStdin, Command, Stdio},
+    sync::{Mutex, OnceLock}, thread, time::SystemTime,
+};
 
 use serde::{Deserialize, Serialize};
 use windows::Win32::{
-    Foundation::{LPARAM, LRESULT, WPARAM},
+    Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Graphics::Gdi::{ClientToScreen, ScreenToClient},
     UI::{
         Input::KeyboardAndMouse::{
             MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
@@ -13,19 +22,65 @@ use windows::Win32::{
             MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, GetMessageW, GetSystemMetrics, SetWindowsHookExW, UnhookWindowsHookEx,
-            HC_ACTION, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, SM_CXVIRTUALSCREEN,
-            SM_CYVIRTUALSCREEN, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-            WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-            WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-            WM_XBUTTONDOWN, WM_XBUTTONUP,
+            CallNextHookEx, EnumWindows, GetAncestor, GetClientRect, GetCursorPos, GetMessageW,
+            GetParent, GetSystemMetrics, GetWindowTextW, IsWindow, IsWindowVisible,
+            PostMessageW, RealChildWindowFromPoint, SendMessageW, SetWindowsHookExW,
+            UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HC_ACTION, KBDLLHOOKSTRUCT, MSG,
+            MSLLHOOKSTRUCT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, WH_KEYBOARD_LL,
+            WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+            WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+            WM_XBUTTONUP,
         },
     },
 };
 
 const WHEEL_DELTA: i16 = 120;
+const MK_LBUTTON_STATE: usize = 0x0001;
+const MK_RBUTTON_STATE: usize = 0x0002;
+const MK_MBUTTON_STATE: usize = 0x0010;
+const CREATE_NO_WINDOW_FLAG: u32 = 0x0800_0000;
+const LDPLAYER_REGISTRY_KEYS: &[&str] = &[
+    r"HKCU\Software\leidian",
+    r"HKLM\SOFTWARE\leidian",
+    r"HKLM\SOFTWARE\WOW6432Node\leidian",
+];
+const LDPLAYER_SHORTCUT_PATTERNS: &[&str] = &["ldplayer", "dnplayer", "雷电"];
 
 static GLOBAL_CALLBACK: Mutex<Option<Box<dyn FnMut(Event) + Send>>> = Mutex::new(None);
+static LDPLAYER_CONSOLE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static LDPLAYER_ADB_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+pub struct LdPlayerTarget {
+    pub index: i32,
+    pub width: i32,
+    pub height: i32,
+    pub serial: String,
+}
+
+pub struct LdPlayerShellSession {
+    serial: String,
+    child: Child,
+    stdin: ChildStdin,
+}
+
+#[derive(Debug, Clone)]
+struct LdPlayerInstance {
+    index: i32,
+    title: String,
+    top_hwnd: isize,
+    bind_hwnd: isize,
+    width: i32,
+    height: i32,
+}
+
+impl Drop for LdPlayerShellSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 #[derive(Debug, Copy, Clone)]
 struct KeyScan {
@@ -875,5 +930,715 @@ fn key_from_vk(code: u16) -> Key {
         105 => Key::Kp9,
         110 => Key::KpDelete,
         _ => Key::Unknown(u32::from(code)),
+    }
+}
+
+
+// ==================== 后台点击相关函数 ====================
+
+pub fn enum_visible_windows() -> Vec<(String, isize)> {
+    let mut windows: Vec<(String, isize)> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_window_callback),
+            LPARAM(&mut windows as *mut _ as isize),
+        );
+    }
+    windows
+}
+
+unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+    if IsWindowVisible(hwnd).as_bool() {
+        let mut text: [u16; 512] = [0; 512];
+        let len = unsafe { GetWindowTextW(hwnd, &mut text) };
+        if len > 0 {
+            let title = String::from_utf16_lossy(&text[..len as usize]);
+            let windows = unsafe { &mut *(lparam.0 as *mut Vec<(String, isize)>) };
+            windows.push((title, hwnd.0 as isize));
+        }
+    }
+    windows::core::BOOL(1)
+}
+
+pub fn window_from_point(x: i32, y: i32) -> Option<isize> {
+    unsafe {
+        let point = POINT { x, y };
+        let hwnd = WindowFromPoint(point);
+        if !hwnd.0.is_null() {
+            Some(hwnd.0 as isize)
+        } else {
+            None
+        }
+    }
+}
+
+pub fn screen_to_client(hwnd: isize, x: i32, y: i32) -> Option<(i32, i32)> {
+    unsafe {
+        let mut point = POINT { x, y };
+        if ScreenToClient(HWND(hwnd as *mut _), &mut point).as_bool() {
+            Some((point.x, point.y))
+        } else {
+            None
+        }
+    }
+}
+
+pub fn client_to_screen(hwnd: isize, x: i32, y: i32) -> Option<(i32, i32)> {
+    unsafe {
+        let mut point = POINT { x, y };
+        if ClientToScreen(HWND(hwnd as *mut _), &mut point).as_bool() {
+            Some((point.x, point.y))
+        } else {
+            None
+        }
+    }
+}
+
+fn client_size(hwnd: isize) -> Option<(i32, i32)> {
+    unsafe {
+        let mut rect = RECT::default();
+        if GetClientRect(HWND(hwnd as *mut _), &mut rect).is_ok() {
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            if width > 0 && height > 0 {
+                Some((width, height))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+}
+
+fn hidden_program_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW_FLAG);
+    command
+}
+
+fn push_console_candidate(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.is_file() && !candidates.iter().any(|candidate| candidate == &path) {
+        candidates.push(path);
+    }
+}
+
+fn push_install_dir_candidate(candidates: &mut Vec<PathBuf>, install_dir: PathBuf) {
+    push_console_candidate(candidates, install_dir.join("ldconsole.exe"));
+}
+
+fn ldplayer_registry_install_dirs() -> Vec<PathBuf> {
+    let mut install_dirs = Vec::new();
+
+    for key in LDPLAYER_REGISTRY_KEYS {
+        let Ok(output) = hidden_program_command("reg")
+            .args(["query", key, "/s"])
+            .output()
+        else {
+            continue;
+        };
+
+        if !output.status.success() {
+            continue;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("InstallDir") {
+                if let Some((_, value)) = trimmed.split_once("REG_SZ") {
+                    let path = PathBuf::from(value.trim());
+                    if path.is_dir() && !install_dirs.iter().any(|existing| existing == &path) {
+                        install_dirs.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    install_dirs
+}
+
+fn shortcut_search_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Some(profile) = env::var_os("USERPROFILE") {
+        let profile = PathBuf::from(profile);
+        roots.push(profile.join("Desktop"));
+    }
+    if let Some(public) = env::var_os("PUBLIC") {
+        roots.push(PathBuf::from(public).join("Desktop"));
+    }
+    if let Some(appdata) = env::var_os("APPDATA") {
+        roots.push(PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs"));
+    }
+    if let Some(program_data) = env::var_os("ProgramData") {
+        roots.push(PathBuf::from(program_data).join(r"Microsoft\Windows\Start Menu\Programs"));
+    }
+
+    roots
+}
+
+fn collect_ldplayer_shortcuts(root: &Path, shortcuts: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_ldplayer_shortcuts(&path, shortcuts);
+            continue;
+        }
+
+        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if !extension.eq_ignore_ascii_case("lnk") {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let normalized = name.to_lowercase();
+        if LDPLAYER_SHORTCUT_PATTERNS
+            .iter()
+            .any(|pattern| normalized.contains(&pattern.to_lowercase()))
+        {
+            shortcuts.push(path);
+        }
+    }
+}
+
+fn powershell_escape_single_quoted_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\'', "''")
+}
+
+fn resolve_shortcut_target(shortcut: &Path) -> Option<PathBuf> {
+    let escaped = powershell_escape_single_quoted_path(shortcut);
+    let script = format!(
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}'); [Console]::Out.Write($s.TargetPath)",
+        escaped
+    );
+
+    let output = hidden_program_command("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let target = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if target.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(target))
+    }
+}
+
+fn ldplayer_shortcut_install_dirs() -> Vec<PathBuf> {
+    let mut shortcuts = Vec::new();
+    for root in shortcut_search_roots() {
+        collect_ldplayer_shortcuts(&root, &mut shortcuts);
+    }
+
+    let mut install_dirs = Vec::new();
+    for shortcut in shortcuts {
+        let Some(target) = resolve_shortcut_target(&shortcut) else {
+            continue;
+        };
+        let Some(parent) = target.parent() else {
+            continue;
+        };
+        let parent = parent.to_path_buf();
+        if parent.join("ldconsole.exe").is_file()
+            && !install_dirs.iter().any(|existing| existing == &parent)
+        {
+            install_dirs.push(parent);
+        }
+    }
+
+    install_dirs
+}
+
+fn ldplayer_console_path() -> Option<&'static PathBuf> {
+    LDPLAYER_CONSOLE_PATH
+        .get_or_init(|| {
+            let mut candidates = Vec::new();
+
+            for install_dir in ldplayer_registry_install_dirs() {
+                push_install_dir_candidate(&mut candidates, install_dir);
+            }
+
+            for install_dir in ldplayer_shortcut_install_dirs() {
+                push_install_dir_candidate(&mut candidates, install_dir);
+            }
+
+            for path in [
+                PathBuf::from(r"C:\leidian\LDPlayer9\ldconsole.exe"),
+                PathBuf::from(r"C:\LDPlayer\LDPlayer9\ldconsole.exe"),
+                PathBuf::from(r"C:\Program Files\ldplayer9\ldconsole.exe"),
+                PathBuf::from(r"C:\Program Files\dnplayerext2\ldconsole.exe"),
+                PathBuf::from(r"C:\leidian\LDPlayer4.0\ldconsole.exe"),
+                PathBuf::from(r"C:\LDPlayer\LDPlayer4.0\ldconsole.exe"),
+                PathBuf::from(r"C:\leidian\dnplayer\ldconsole.exe"),
+            ] {
+                push_console_candidate(&mut candidates, path);
+            }
+
+            for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+                if let Some(base) = env::var_os(key) {
+                    let base = PathBuf::from(base);
+                    push_console_candidate(&mut candidates, base.join("ldplayer9").join("ldconsole.exe"));
+                    push_console_candidate(&mut candidates, base.join("dnplayerext2").join("ldconsole.exe"));
+                    push_console_candidate(&mut candidates, base.join("dnplayer").join("ldconsole.exe"));
+                }
+            }
+
+            candidates.into_iter().find(|path| path.is_file())
+        })
+        .as_ref()
+}
+
+fn hidden_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW_FLAG);
+    command
+}
+
+fn ldplayer_adb_path() -> Option<&'static PathBuf> {
+    LDPLAYER_ADB_PATH
+        .get_or_init(|| {
+            ldplayer_console_path()
+                .and_then(|console| console.parent().map(|parent| parent.join("adb.exe")))
+                .filter(|path| path.is_file())
+        })
+        .as_ref()
+}
+
+pub fn is_likely_ldplayer_window(title: &str) -> bool {
+    let normalized = title.to_lowercase();
+    normalized.contains("雷电")
+        || normalized.contains("ldplayer")
+        || normalized.contains("dnplayer")
+}
+
+fn ldplayer_instances() -> Result<Vec<LdPlayerInstance>, String> {
+    let Some(console) = ldplayer_console_path() else {
+        return Err("LDPlayer console not found".to_string());
+    };
+
+    let output = hidden_command(console)
+        .arg("list2")
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut instances = Vec::new();
+
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() < 10 {
+            continue;
+        }
+
+        let Ok(index) = parts[0].trim().parse::<i32>() else {
+            continue;
+        };
+        let Ok(top_hwnd) = parts[2].trim().parse::<isize>() else {
+            continue;
+        };
+        let Ok(bind_hwnd) = parts[3].trim().parse::<isize>() else {
+            continue;
+        };
+        let Ok(width) = parts[7].trim().parse::<i32>() else {
+            continue;
+        };
+        let Ok(height) = parts[8].trim().parse::<i32>() else {
+            continue;
+        };
+
+        instances.push(LdPlayerInstance {
+            index,
+            title: parts[1].trim().to_string(),
+            top_hwnd,
+            bind_hwnd,
+            width,
+            height,
+        });
+    }
+
+    Ok(instances)
+}
+
+fn ldplayer_serial(index: i32) -> Result<String, String> {
+    let Some(console) = ldplayer_console_path() else {
+        return Err("LDPlayer console not found".to_string());
+    };
+
+    let output = hidden_command(console)
+        .args(["adb", "--index", &index.to_string(), "--command", "get-serialno"])
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let serial = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if serial.is_empty() {
+        Err("LDPlayer adb serial is empty".to_string())
+    } else {
+        Ok(serial)
+    }
+}
+
+pub fn resolve_ldplayer_target(root_hwnd: isize, title: &str) -> Option<LdPlayerTarget> {
+    let instances = ldplayer_instances().ok()?;
+
+    let matched = instances
+        .iter()
+        .find(|instance| instance.top_hwnd == root_hwnd || instance.bind_hwnd == root_hwnd)
+        .or_else(|| instances.iter().find(|instance| instance.title == title))
+        .or_else(|| {
+            instances.iter().find(|instance| {
+                instance.title.contains(title) || title.contains(instance.title.as_str())
+            })
+        })?;
+
+    Some(LdPlayerTarget {
+        index: matched.index,
+        width: matched.width,
+        height: matched.height,
+        serial: ldplayer_serial(matched.index).ok()?,
+    })
+}
+
+pub fn resolve_click_target_hwnd(root_hwnd: isize, x: i32, y: i32) -> Option<isize> {
+    if !is_window(root_hwnd) {
+        return None;
+    }
+
+    let mut current = HWND(root_hwnd as *mut _);
+
+    loop {
+        let Some((client_x, client_y)) = screen_to_client(current.0 as isize, x, y) else {
+            break;
+        };
+
+        let child = unsafe {
+            RealChildWindowFromPoint(
+                current,
+                POINT {
+                    x: client_x,
+                    y: client_y,
+                },
+            )
+        };
+
+        if child.0.is_null() || child == current {
+            break;
+        }
+
+        current = child;
+    }
+
+    Some(current.0 as isize)
+}
+
+fn window_dispatch_chain(target_hwnd: isize, root_hwnd: isize) -> Vec<isize> {
+    let mut chain = Vec::with_capacity(4);
+    let mut current = target_hwnd;
+
+    loop {
+        if !is_window(current) || chain.contains(&current) {
+            break;
+        }
+
+        chain.push(current);
+        if current == root_hwnd {
+            break;
+        }
+
+        let Ok(parent) = (unsafe { GetParent(HWND(current as *mut _)) }) else {
+            if !chain.contains(&root_hwnd) && is_window(root_hwnd) {
+                chain.push(root_hwnd);
+            }
+            break;
+        };
+
+        if parent.0.is_null() {
+            if !chain.contains(&root_hwnd) && is_window(root_hwnd) {
+                chain.push(root_hwnd);
+            }
+            break;
+        }
+
+        current = parent.0 as isize;
+    }
+
+    chain
+}
+
+pub fn is_window(hwnd: isize) -> bool {
+    unsafe { IsWindow(Some(HWND(hwnd as *mut _))).as_bool() }
+}
+
+fn make_mouse_lparam(x: i32, y: i32) -> LPARAM {
+    let x16 = (x as u16) as u32;
+    let y16 = (y as u16) as u32;
+    LPARAM(((y16 << 16) | x16) as isize)
+}
+
+fn mouse_button_messages(button: &str) -> Result<(u32, u32, usize), String> {
+    match button {
+        "left" => Ok((WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON_STATE)),
+        "middle" => Ok((WM_MBUTTONDOWN, WM_MBUTTONUP, MK_MBUTTON_STATE)),
+        "right" => Ok((WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON_STATE)),
+        _ => Err(format!("Unsupported click button: {}", button)),
+    }
+}
+
+fn send_mouse_move(hwnd: isize, x: i32, y: i32, synchronous: bool) {
+    let h = HWND(hwnd as *mut _);
+    let lparam = make_mouse_lparam(x, y);
+    unsafe {
+        if synchronous {
+            let _ = SendMessageW(h, WM_MOUSEMOVE, Some(WPARAM(0)), Some(lparam));
+        } else {
+            let _ = PostMessageW(Some(h), WM_MOUSEMOVE, WPARAM(0), lparam);
+        }
+    }
+}
+
+fn send_mouse_click(hwnd: isize, button: &str, x: i32, y: i32, synchronous: bool) -> Result<(), String> {
+    let h = HWND(hwnd as *mut _);
+    let (down_msg, up_msg, down_wparam) = mouse_button_messages(button)?;
+    let lparam = make_mouse_lparam(x, y);
+    unsafe {
+        if synchronous {
+            let _ = SendMessageW(h, down_msg, Some(WPARAM(down_wparam)), Some(lparam));
+            let _ = SendMessageW(h, up_msg, Some(WPARAM(0)), Some(lparam));
+        } else {
+            let _ = PostMessageW(Some(h), down_msg, WPARAM(down_wparam), lparam);
+            thread::sleep(std::time::Duration::from_millis(2));
+            let _ = PostMessageW(Some(h), up_msg, WPARAM(0), lparam);
+        }
+    }
+    Ok(())
+}
+
+pub fn dispatch_background_click(
+    root_hwnd: isize,
+    button: &str,
+    root_client_x: i32,
+    root_client_y: i32,
+) -> Result<(), String> {
+    let (screen_x, screen_y) = client_to_screen(root_hwnd, root_client_x, root_client_y)
+        .ok_or("Failed to convert client position to screen position".to_string())?;
+
+    let target_hwnd = resolve_click_target_hwnd(root_hwnd, screen_x, screen_y).unwrap_or(root_hwnd);
+    let dispatch_chain = window_dispatch_chain(target_hwnd, root_hwnd);
+
+    for hwnd in dispatch_chain.iter().rev() {
+        if let Some((client_x, client_y)) = screen_to_client(*hwnd, screen_x, screen_y) {
+            send_mouse_move(*hwnd, client_x, client_y, true);
+        }
+    }
+
+    let (target_client_x, target_client_y) = screen_to_client(target_hwnd, screen_x, screen_y)
+        .ok_or("Failed to convert target position to client position".to_string())?;
+
+    send_mouse_click(target_hwnd, button, target_client_x, target_client_y, true)
+}
+
+pub fn dispatch_ldplayer_click(
+    target: &LdPlayerTarget,
+    root_hwnd: isize,
+    button: &str,
+    root_client_x: i32,
+    root_client_y: i32,
+) -> Result<(), String> {
+    let (tap_x, tap_y) =
+        ldplayer_tap_position(target, button, root_hwnd, root_client_x, root_client_y)?;
+
+    let Some(console) = ldplayer_console_path() else {
+        return Err("LDPlayer console not found".to_string());
+    };
+
+    let output = hidden_command(console)
+        .args([
+            "adb",
+            "--index",
+            &target.index.to_string(),
+            "--command",
+            &format!("shell input tap {} {}", tap_x, tap_y),
+        ])
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+fn ldplayer_tap_position(
+    target: &LdPlayerTarget,
+    button: &str,
+    root_hwnd: isize,
+    root_client_x: i32,
+    root_client_y: i32,
+) -> Result<(i32, i32), String> {
+    if button != "left" {
+        return Err("LDPlayer fallback only supports left click".to_string());
+    }
+
+    let (screen_x, screen_y) = client_to_screen(root_hwnd, root_client_x, root_client_y)
+        .ok_or("Failed to convert root client position to screen position".to_string())?;
+
+    let target_hwnd = resolve_click_target_hwnd(root_hwnd, screen_x, screen_y).unwrap_or(root_hwnd);
+    let (view_x, view_y) = screen_to_client(target_hwnd, screen_x, screen_y)
+        .or_else(|| screen_to_client(root_hwnd, screen_x, screen_y))
+        .ok_or("Failed to resolve LDPlayer view coordinates".to_string())?;
+
+    let (view_width, view_height) = client_size(target_hwnd)
+        .or_else(|| client_size(root_hwnd))
+        .ok_or("Failed to resolve LDPlayer view size".to_string())?;
+
+    if target.width <= 0 || target.height <= 0 {
+        return Err("Invalid LDPlayer device resolution".to_string());
+    }
+
+    let tap_x = ((i64::from(view_x) * i64::from(target.width)) / i64::from(view_width))
+        .clamp(0, i64::from(target.width.saturating_sub(1))) as i32;
+    let tap_y = ((i64::from(view_y) * i64::from(target.height)) / i64::from(view_height))
+        .clamp(0, i64::from(target.height.saturating_sub(1))) as i32;
+
+    Ok((tap_x, tap_y))
+}
+
+fn spawn_ldplayer_shell(target: &LdPlayerTarget) -> Result<LdPlayerShellSession, String> {
+    let Some(adb) = ldplayer_adb_path() else {
+        return Err("LDPlayer adb executable not found".to_string());
+    };
+
+    let mut child = hidden_command(adb)
+        .args(["-s", &target.serial, "shell"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| err.to_string())?;
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or("Failed to open LDPlayer adb shell stdin".to_string())?;
+
+    Ok(LdPlayerShellSession {
+        serial: target.serial.clone(),
+        child,
+        stdin,
+    })
+}
+
+pub fn dispatch_ldplayer_click_via_shell(
+    session: &mut Option<LdPlayerShellSession>,
+    target: &LdPlayerTarget,
+    button: &str,
+    root_hwnd: isize,
+    root_client_x: i32,
+    root_client_y: i32,
+) -> Result<(), String> {
+    if button != "left" {
+        return Err("LDPlayer fallback only supports left click".to_string());
+    }
+
+    let (tap_x, tap_y) =
+        ldplayer_tap_position(target, button, root_hwnd, root_client_x, root_client_y)?;
+
+    let needs_restart = match session.as_mut() {
+        Some(existing) if existing.serial == target.serial => {
+            existing.child.try_wait().map_err(|err| err.to_string())?.is_some()
+        }
+        Some(_) => true,
+        None => true,
+    };
+
+    if needs_restart {
+        *session = Some(spawn_ldplayer_shell(target)?);
+    }
+
+    let mut last_error = None;
+    for attempt in 0..2 {
+        let Some(existing) = session.as_mut() else {
+            return Err("LDPlayer adb shell session unavailable".to_string());
+        };
+
+        if let Err(err) = writeln!(existing.stdin, "input tap {} {}", tap_x, tap_y)
+            .and_then(|_| existing.stdin.flush())
+        {
+            last_error = Some(err.to_string());
+            *session = None;
+            if attempt == 0 {
+                *session = Some(spawn_ldplayer_shell(target)?);
+                continue;
+            }
+        } else {
+            return Ok(());
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "Failed to write to LDPlayer adb shell".to_string()))
+}
+
+
+pub fn get_cursor_pos() -> Option<(i32, i32)> {
+    unsafe {
+        let mut point = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut point).is_ok() {
+            Some((point.x, point.y))
+        } else {
+            None
+        }
+    }
+}
+
+pub fn get_window_title(hwnd: isize) -> String {
+    unsafe {
+        let mut text: [u16; 512] = [0; 512];
+        let len = GetWindowTextW(HWND(hwnd as *mut _), &mut text);
+        if len > 0 {
+            String::from_utf16_lossy(&text[..len as usize])
+        } else {
+            String::new()
+        }
+    }
+}
+
+pub fn get_root_window(hwnd: isize) -> isize {
+    unsafe {
+        let root = GetAncestor(HWND(hwnd as *mut _), GA_ROOT);
+        if root.0.is_null() {
+            hwnd
+        } else {
+            root.0 as isize
+        }
     }
 }
