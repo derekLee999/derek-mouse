@@ -125,21 +125,53 @@ function Get-SetupExe {
   return $Matches[0]
 }
 
+function New-UploadArtifacts {
+  param(
+    [string]$NsisDir,
+    [string]$Version,
+    [string]$ProjectRoot
+  )
+
+  $SetupExe = Get-SetupExe -NsisDir $NsisDir -Version $Version
+  $SetupSigPath = "$($SetupExe.FullName).sig"
+  if (-not (Test-Path -LiteralPath $SetupSigPath)) {
+    throw "Could not find updater signature file: $SetupSigPath"
+  }
+
+  $UploadDir = Join-Path $ProjectRoot ".codex-run\release-assets\$Version"
+  New-Item -ItemType Directory -Force -Path $UploadDir | Out-Null
+
+  $UploadSetupExeName = "derek-mouse_${Version}_x64-setup.exe"
+  $UploadSetupExePath = Join-Path $UploadDir $UploadSetupExeName
+  $UploadSetupSigPath = "$UploadSetupExePath.sig"
+
+  Copy-Item -LiteralPath $SetupExe.FullName -Destination $UploadSetupExePath -Force
+  Copy-Item -LiteralPath $SetupSigPath -Destination $UploadSetupSigPath -Force
+
+  return [pscustomobject]@{
+    LocalSetupExePath  = $SetupExe.FullName
+    LocalSetupSigPath  = $SetupSigPath
+    UploadSetupExeName = $UploadSetupExeName
+    UploadSetupExePath = $UploadSetupExePath
+    UploadSetupSigPath = $UploadSetupSigPath
+  }
+}
+
 function New-LatestJson {
   param(
     [string]$NsisDir,
     [string]$Version,
     [string]$Repo,
-    [string]$NotesText
+    [string]$NotesText,
+    [string]$SetupAssetName,
+    [string]$SignaturePath
   )
 
-  $SetupExe = Get-SetupExe -NsisDir $NsisDir -Version $Version
-  $SigPath = "$($SetupExe.FullName).sig"
-  if (-not (Test-Path -LiteralPath $SigPath)) {
-    throw "Could not find updater signature file: $SigPath"
+  if (-not (Test-Path -LiteralPath $SignaturePath)) {
+    throw "Could not find updater signature file: $SignaturePath"
   }
 
-  $Signature = (Get-Content -Raw -LiteralPath $SigPath).Trim()
+  $Signature = (Get-Content -Raw -LiteralPath $SignaturePath).Trim()
   $Tag = "v$Version"
   $LatestJsonPath = Join-Path $NsisDir "latest.json"
   $Json = [ordered]@{
@@ -148,7 +180,7 @@ function New-LatestJson {
     pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     platforms = @{
       "windows-x86_64" = @{
-        url       = "https://github.com/$Repo/releases/download/$Tag/$($SetupExe.Name)"
+        url       = "https://github.com/$Repo/releases/download/$Tag/$SetupAssetName"
         signature = $Signature
       }
     }
@@ -156,8 +188,7 @@ function New-LatestJson {
 
   Write-Utf8NoBomFile -Path $LatestJsonPath -Content $Json
   return [pscustomobject]@{
-    SetupExePath   = $SetupExe.FullName
-    SetupSigPath   = $SigPath
+    SetupAssetName = $SetupAssetName
     LatestJsonPath = $LatestJsonPath
   }
 }
@@ -230,13 +261,20 @@ try {
   }
 
   $NotesText = Get-ReleaseNotesText -InlineNotes $ReleaseNotes -NotesFilePath $NotesFile -Version $Version
-  $Artifacts = New-LatestJson -NsisDir $NsisDir -Version $Version -Repo $Repo -NotesText $NotesText
+  $UploadArtifacts = New-UploadArtifacts -NsisDir $NsisDir -Version $Version -ProjectRoot $ProjectRoot
+  $Artifacts = New-LatestJson `
+    -NsisDir $NsisDir `
+    -Version $Version `
+    -Repo $Repo `
+    -NotesText $NotesText `
+    -SetupAssetName $UploadArtifacts.UploadSetupExeName `
+    -SignaturePath $UploadArtifacts.LocalSetupSigPath
 
   Write-Success "Generated latest.json:"
   Write-Host (" - " + $Artifacts.LatestJsonPath)
   Write-Success "Suggested assets to upload to GitHub Release:"
-  Write-Host (" - " + $Artifacts.SetupExePath)
-  Write-Host (" - " + $Artifacts.SetupSigPath)
+  Write-Host (" - " + $UploadArtifacts.UploadSetupExePath)
+  Write-Host (" - " + $UploadArtifacts.UploadSetupSigPath)
   Write-Host (" - " + $Artifacts.LatestJsonPath)
 
   if ($Publish) {
@@ -253,8 +291,8 @@ try {
 
     $Arguments = @(
       "release", "create", $Tag,
-      $Artifacts.SetupExePath,
-      $Artifacts.SetupSigPath,
+      $UploadArtifacts.UploadSetupExePath,
+      $UploadArtifacts.UploadSetupSigPath,
       $Artifacts.LatestJsonPath,
       "--repo", $Repo,
       "--title", $Tag,

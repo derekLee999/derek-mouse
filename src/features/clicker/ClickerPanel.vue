@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, TauriEvent, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow, type WebviewWindow as WebviewWindowType } from "@tauri-apps/api/webviewWindow";
-import { QuestionFilled } from "@element-plus/icons-vue";
+import { Close, QuestionFilled } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import {
   type ClickerConfig,
@@ -105,6 +105,7 @@ async function saveConfig() {
 }
 
 function buildConfigPayload(): ClickerConfig {
+  const backendClickEnabled = config.backendClick && hasSelectedTargetWindow();
   return {
     clickButton: config.clickButton,
     intervalSecs: config.intervalSecs,
@@ -116,11 +117,15 @@ function buildConfigPayload(): ClickerConfig {
       alt: props.hotkey.alt,
       key: props.hotkey.key,
     },
-    backendClick: config.backendClick,
+    backendClick: backendClickEnabled,
     targetWindowTitle: config.targetWindowTitle,
     targetClientX: config.targetClientX,
     targetClientY: config.targetClientY,
   };
+}
+
+function hasSelectedTargetWindow() {
+  return !!config.targetWindowTitle.trim() && config.targetClientX !== null && config.targetClientY !== null;
 }
 
 function applyState(state: ClickerState) {
@@ -235,6 +240,15 @@ function cancelPickWindow() {
     invoke("cancel_mouse_coordinate_pick");
   } catch {}
 }
+
+function clearTargetWindow() {
+  if (running.value) return;
+
+  config.backendClick = false;
+  config.targetWindowTitle = "";
+  config.targetClientX = null;
+  config.targetClientY = null;
+}
 </script>
 
 <template>
@@ -330,9 +344,21 @@ function cancelPickWindow() {
           <span>目标窗口</span>
         </template>
         <div class="target-window-row">
-          <span v-if="config.targetWindowTitle" class="target-window-title" :title="config.targetWindowTitle">
-            {{ config.targetWindowTitle }}
-          </span>
+          <div v-if="config.targetWindowTitle" class="target-window-box">
+            <span class="target-window-title" :title="config.targetWindowTitle">
+              {{ config.targetWindowTitle }}
+            </span>
+            <button
+              class="target-window-clear"
+              type="button"
+              title="清空目标窗口"
+              aria-label="清空目标窗口"
+              :disabled="running"
+              @click="clearTargetWindow"
+            >
+              <el-icon :size="12"><Close /></el-icon>
+            </button>
+          </div>
           <span v-else class="target-window-placeholder">未选择</span>
           <el-button
             size="small"
@@ -431,9 +457,18 @@ function cancelPickWindow() {
   align-items: center;
 }
 
-.target-window-title {
+.target-window-box {
+  position: relative;
   min-width: 0;
-  max-width: 25ch;
+  padding: 8px 26px 8px 10px;
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+}
+
+.target-window-title {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   color: var(--el-text-color-primary);
   font-size: 13px;
@@ -441,8 +476,36 @@ function cancelPickWindow() {
   white-space: nowrap;
 }
 
-.target-window-placeholder {
+.target-window-clear {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
   color: var(--el-text-color-placeholder);
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.target-window-clear:hover {
+  color: var(--el-color-danger);
+  background: var(--el-fill-color);
+}
+
+.target-window-clear:disabled,
+.target-window-clear:disabled:hover {
+  color: var(--el-text-color-disabled);
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.target-window-placeholder {
+  color: var(--el-color-danger);
   font-size: 13px;
 }
 

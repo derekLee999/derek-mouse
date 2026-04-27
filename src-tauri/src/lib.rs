@@ -94,6 +94,13 @@ impl AppState {
 
         tray::set_status(status);
     }
+
+    fn is_coordinate_pick_active(&self) -> bool {
+        self.coordinate_pick_session
+            .lock()
+            .map(|session| session.is_some())
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -912,6 +919,10 @@ fn spawn_global_listener(state: Arc<AppState>, app: tauri::AppHandle) {
 }
 
 fn handle_global_event(state: &Arc<AppState>, app: &tauri::AppHandle, event: Event) {
+    if state.is_coordinate_pick_active() {
+        return;
+    }
+
     let active_feature = state
         .active_feature
         .lock()

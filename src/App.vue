@@ -37,7 +37,13 @@ const formattedUpdateNotes = computed(() => {
   return notes?.length ? notes : "暂无更新说明。";
 });
 const latestUpdateLabel = computed(
-  () => updateInfo.value?.latestTag ?? updateInfo.value?.latestVersion ?? "",
+  () => formatVersionLabel(updateInfo.value?.latestTag ?? updateInfo.value?.latestVersion ?? ""),
+);
+const currentUpdateLabel = computed(
+  () => formatVersionLabel(updateInfo.value?.currentVersion ?? ""),
+);
+const formattedPublishedAt = computed(
+  () => formatPublishedAt(updateInfo.value?.publishedAt ?? null),
 );
 
 watch(
@@ -140,6 +146,27 @@ async function openReleasePage() {
     await openUrl(updateInfo.value.releaseUrl);
   }
 }
+
+function formatVersionLabel(version: string | null | undefined) {
+  return (version ?? "").trim().replace(/^[vV]/, "");
+}
+
+function formatPublishedAt(value: string | null) {
+  if (!value) return "";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
 </script>
 
 <template>
@@ -207,15 +234,15 @@ async function openReleasePage() {
         <div class="update-summary">
           <div class="update-version-row">
             <span class="update-version-label">当前版本</span>
-            <b>{{ updateInfo.currentVersion }}</b>
+            <b>{{ currentUpdateLabel }}</b>
           </div>
           <div class="update-version-row">
             <span class="update-version-label">最新版本</span>
             <b>{{ latestUpdateLabel }}</b>
           </div>
-          <div v-if="updateInfo.publishedAt" class="update-version-row">
+          <div v-if="formattedPublishedAt" class="update-version-row">
             <span class="update-version-label">发布时间</span>
-            <span>{{ updateInfo.publishedAt }}</span>
+            <span>{{ formattedPublishedAt }}</span>
           </div>
         </div>
 

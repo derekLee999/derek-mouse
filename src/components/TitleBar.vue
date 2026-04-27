@@ -168,6 +168,10 @@ function hideExitMenu() {
 function openUpdatePanel() {
   emit("open-update");
 }
+
+function formatVersionLabel(version: string | null | undefined) {
+  return (version ?? "").trim().replace(/^[vV]/, "");
+}
 </script>
 
 <template>
@@ -213,7 +217,7 @@ function openUpdatePanel() {
       </el-popover>
       <el-tooltip
         v-if="props.updateInfo?.available"
-        :content="`检测到新版本 ${props.updateInfo.latestTag ?? props.updateInfo.latestVersion}`"
+        :content="`检测到新版本 ${formatVersionLabel(props.updateInfo.latestTag ?? props.updateInfo.latestVersion)}`"
         placement="bottom"
       >
         <button

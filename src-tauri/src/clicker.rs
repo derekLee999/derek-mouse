@@ -608,11 +608,13 @@ fn normalize_config(mut config: ClickerConfig) -> Result<ClickerConfig, String> 
     }
 
     if config.target_window_title.is_empty() {
+        config.backend_click = false;
         config.target_client_x = None;
         config.target_client_y = None;
     }
 
     if config.target_client_x.is_none() || config.target_client_y.is_none() {
+        config.backend_click = false;
         config.target_client_x = None;
         config.target_client_y = None;
     }
