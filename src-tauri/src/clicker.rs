@@ -607,6 +607,10 @@ fn normalize_config(mut config: ClickerConfig) -> Result<ClickerConfig, String> 
         config.hold_button = "left".to_string();
     }
 
+    if config.mode == "hold" {
+        config.backend_click = false;
+    }
+
     if config.target_window_title.is_empty() {
         config.backend_click = false;
         config.target_client_x = None;

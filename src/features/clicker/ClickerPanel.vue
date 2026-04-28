@@ -105,7 +105,7 @@ async function saveConfig() {
 }
 
 function buildConfigPayload(): ClickerConfig {
-  const backendClickEnabled = config.backendClick && hasSelectedTargetWindow();
+  const backendClickEnabled = config.mode === "toggle" && config.backendClick && hasSelectedTargetWindow();
   return {
     clickButton: config.clickButton,
     intervalSecs: config.intervalSecs,
@@ -161,6 +161,9 @@ function handleClickLimitChange(value: number | undefined) {
 function handleModeChange() {
   if (config.mode === "hold" && config.holdButton === "middle") {
     config.holdButton = "left";
+  }
+  if (config.mode === "hold") {
+    config.backendClick = false;
   }
 }
 
@@ -324,7 +327,7 @@ function clearTargetWindow() {
         />
       </el-form-item>
 
-      <el-form-item>
+      <el-form-item v-if="config.mode === 'toggle'">
         <template #label>
           <span>后台点击</span>
         </template>
@@ -339,7 +342,7 @@ function clearTargetWindow() {
         </div>
       </el-form-item>
 
-      <el-form-item v-if="config.backendClick">
+      <el-form-item v-if="config.mode === 'toggle' && config.backendClick">
         <template #label>
           <span>目标窗口</span>
         </template>

@@ -115,12 +115,35 @@ function Get-ReleaseNotesText {
 function Get-SetupExe {
   param(
     [string]$NsisDir,
-    [string]$Version
+    [string]$Version,
+    [switch]$BuildSkipped
   )
 
   $Matches = Get-ChildItem -Path $NsisDir -File -Filter "*_${Version}_x64-setup.exe" | Sort-Object Name
   if (-not $Matches) {
-    throw "Could not find setup exe for version $Version in $NsisDir"
+    $ExistingFiles = Get-ChildItem -Path $NsisDir -File -Filter "*_x64-setup.exe" |
+      Sort-Object Name |
+      Select-Object -ExpandProperty Name
+
+    $Message = @(
+      "Could not find setup exe for version $Version in $NsisDir."
+      "Expected file pattern: *_${Version}_x64-setup.exe"
+    )
+
+    if ($BuildSkipped) {
+      $Message += "You used -SkipBuild, so the script expected existing build artifacts for version $Version."
+      $Message += "Run .\scripts\release.ps1 -Version $Version without -SkipBuild first, or manually build version $Version before publishing."
+    } else {
+      $Message += "The build step may have failed or did not produce the expected NSIS installer."
+    }
+
+    if ($ExistingFiles) {
+      $Message += "Existing setup files in that directory: $($ExistingFiles -join ', ')"
+    } else {
+      $Message += "No setup exe files were found in that directory."
+    }
+
+    throw ($Message -join " ")
   }
   return $Matches[0]
 }
@@ -132,7 +155,7 @@ function New-UploadArtifacts {
     [string]$ProjectRoot
   )
 
-  $SetupExe = Get-SetupExe -NsisDir $NsisDir -Version $Version
+  $SetupExe = Get-SetupExe -NsisDir $NsisDir -Version $Version -BuildSkipped:$SkipBuild
   $SetupSigPath = "$($SetupExe.FullName).sig"
   if (-not (Test-Path -LiteralPath $SetupSigPath)) {
     throw "Could not find updater signature file: $SetupSigPath"
