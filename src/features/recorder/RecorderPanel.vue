@@ -65,6 +65,7 @@ const recordingMenu = ref<{
 const busy = computed(() => state.value.recording || state.value.playing);
 const selectedKeyNeedsModifier = computed(() => keyNeedsModifier(recordHotkey.key));
 const speedOptions = [1, 1.5, 2, 2.5, 3];
+const recordHotkeyOptions = keyboardKeys.filter((key) => !["SPACE", "ENTER", "ESC"].includes(key));
 
 let unlistenState: UnlistenFn | undefined;
 let unlistenStatus: UnlistenFn | undefined;
@@ -491,7 +492,7 @@ function formatTime(timestamp: number) {
           @change="handleRecordKeyChange"
         >
           <el-option
-            v-for="key in keyboardKeys"
+            v-for="key in recordHotkeyOptions"
             :key="key"
             :label="key"
             :value="key"

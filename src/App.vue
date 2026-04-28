@@ -84,9 +84,10 @@ async function checkForAppUpdate(promptOnAvailable = false) {
   try {
     const nextInfo = await invoke<AppUpdateInfo>("check_app_update");
     updateInfo.value = nextInfo;
-    if (promptOnAvailable && nextInfo.available) {
+    if (nextInfo.available && promptOnAvailable) {
       updateDialogVisible.value = true;
     }
+    return nextInfo;
   } catch (error) {
     if (!promptOnAvailable) {
       ElMessage.error(String(error));
@@ -101,6 +102,17 @@ function openUpdateDialog() {
     updateDialogVisible.value = true;
   } else {
     void checkForAppUpdate(false);
+  }
+}
+
+async function checkUpdateFromVersion() {
+  const nextInfo = await checkForAppUpdate(false);
+  if (!nextInfo) return;
+
+  if (nextInfo.available) {
+    updateDialogVisible.value = true;
+  } else {
+    ElMessage.success("已是最新版本");
   }
 }
 
@@ -180,6 +192,7 @@ function formatPublishedAt(value: string | null) {
       :update-info="updateInfo"
       :update-installing="installingUpdate"
       @open-update="openUpdateDialog"
+      @check-update="checkUpdateFromVersion"
     />
 
     <section class="workspace-tabs-shell">
@@ -330,13 +343,11 @@ input {
   min-height: 0;
   max-width: 1080px;
   width: 100%;
-  height: calc(100% - 20px);
-  margin: 10px auto;
+  height: calc(100% - 10px);
+  margin: 0 auto 10px;
   padding: 10px 14px 14px;
   overflow: hidden;
   background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
 }
 
 .workspace-tabs :deep(.el-tabs__header) {
@@ -363,7 +374,7 @@ input {
 
 .workspace-hotkey-indicator {
   position: absolute;
-  top: 24px;
+  top: 14px;
   right: calc(50% - 540px + 24px);
   display: inline-flex;
   align-items: center;

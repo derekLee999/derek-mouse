@@ -149,12 +149,12 @@ function sameHotkey(left: HotkeyConfig, right: HotkeyConfig) {
   <section class="global-hotkey-bar" :class="{ popover: isPopover, disabled: props.disabled }">
     <div class="hotkey-head">
       <div class="hotkey-title-block">
-        <strong class="hotkey-label">全局启停热键</strong>
+        <strong class="hotkey-label">全局启停热键 <span class="hotkey-value">{{ displayHotkey }}</span></strong>
         <span v-if="isPopover" class="hotkey-hint">
           用于启停鼠标连点、键鼠录制回放、鼠标宏回放
         </span>
       </div>
-      <span class="hotkey-value">{{ displayHotkey }}</span>
+      
     </div>
 
     <div class="hotkey-controls">
@@ -250,6 +250,7 @@ function sameHotkey(left: HotkeyConfig, right: HotkeyConfig) {
 }
 
 .hotkey-value {
+  margin-left: 12px;
   color: var(--el-text-color-primary);
   font-size: 14px;
   font-weight: 700;

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Close,
@@ -27,6 +29,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:modelValue": [value: HotkeyConfig];
   "open-update": [];
+  "check-update": [];
 }>();
 
 const alwaysOnTop = ref(false);
@@ -39,8 +42,10 @@ const closeAction = ref<CloseAction>("hide");
 const settingsVisible = ref(false);
 const hotkeyPopoverVisible = ref(false);
 const exitMenuVisible = ref(false);
+const appVersion = ref("--");
 
 const systemDarkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+const repoUrl = "https://github.com/derekLee999/derek-mouse";
 
 function applyTheme() {
   let dark = false;
@@ -81,6 +86,9 @@ function saveSettings() {
 }
 
 onMounted(async () => {
+  try {
+    appVersion.value = await getVersion();
+  } catch {}
   alwaysOnTop.value = await appWindow.isAlwaysOnTop();
   try {
     const options = await invoke<GlobalHotkeyOptions>("get_global_hotkey_options");
@@ -169,8 +177,16 @@ function openUpdatePanel() {
   emit("open-update");
 }
 
+function checkUpdateFromVersion() {
+  emit("check-update");
+}
+
 function formatVersionLabel(version: string | null | undefined) {
   return (version ?? "").trim().replace(/^[vV]/, "");
+}
+
+async function openRepoUrl() {
+  await openUrl(repoUrl);
 }
 </script>
 
@@ -330,6 +346,16 @@ function formatVersionLabel(version: string | null | undefined) {
             @change="toggleAutoHideOnHotkey"
           />
         </div>
+        <div class="settings-meta">
+          <button type="button" class="version-check-btn" @click="checkUpdateFromVersion">
+            <span class="settings-meta-label">版本号</span>
+            <span class="settings-meta-value version-check-value">v{{ appVersion }}</span>
+          </button>
+          <button type="button" class="repo-link" @click="openRepoUrl">
+            <span class="settings-meta-label">GitHub</span>
+            <span class="settings-meta-value repo-text">derekLee999/derek-mouse</span>
+          </button>
+        </div>
       </div>
     </el-dialog>
   </header>
@@ -447,6 +473,24 @@ function formatVersionLabel(version: string | null | undefined) {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  user-select: none;
+}
+
+.settings-meta {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  margin-top: 2px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.settings-meta-row,
+.repo-link,
+.version-check-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .settings-item {
@@ -465,6 +509,58 @@ function formatVersionLabel(version: string | null | undefined) {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+.settings-meta-label {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-meta-value {
+  min-width: 0;
+  color: var(--el-text-color-primary);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.repo-link {
+  padding: 8px 10px;
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.version-check-btn {
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.version-check-value {
+  color: var(--el-color-primary);
+}
+
+.repo-link:hover {
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
+}
+
+.version-check-btn:hover .version-check-value {
+  color: var(--el-color-primary-dark-2);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.repo-text {
+  color: var(--el-color-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .help-icon {
